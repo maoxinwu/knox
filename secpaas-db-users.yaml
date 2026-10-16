@@ -1,0 +1,310 @@
+# =============================================================================
+# secpaas 命名空间数据库只读写（无删除权限）账号创建
+# 账号统一命名：secapp_rw
+#
+# 使用方法：
+#   1. 先修改下方 Secret 中的密码占位符（建议 openssl rand -base64 24 生成）
+#   2. kubectl apply -f secpaas-db-users.yaml
+#      （Nebula 的 Job 可与 nebula-02-cluster.yaml 一次性同时 apply，无需等待
+#        集群就绪，Job 会自动轮询等待 graphd；其余 Job 需对应中间件已就绪）
+#   3. kubectl -n secpaas get jobs -w   等待各 Job 全部 Completed
+#   4. 按 Job 名称查看日志确认执行结果
+#
+# 覆盖范围：
+#   - PostgreSQL（postgresql-headless:5432）
+#   - Doris FE（doriscluster-zxsk-fe-service:9030）
+#   - Nebula Graph（nebula-graphd-svc:9669，GUEST 只读 @ space zxsk_csp_siocc）
+#   - Redis cluster：按需求暂不做 ACL 权限控制，见文件内注释说明
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 新账号密码。apply 前必须替换所有 CHANGE_ME 开头的占位符！
+# pg-admin-password：PostgreSQL 管理员 postgres 的密码
+#   （取自 STS postgresql 的 POSTGRES_PASSWORD 环境变量）
+# doris-root-password：Doris root 密码；当前集群 root 默认无密码，保持空即可
+# nebula-root-password：Nebula root 的密码，按用户决策保持默认值 "nebula"
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: Secret
+metadata:
+  name: secpaas-db-users
+  namespace: secpaas
+type: Opaque
+stringData:
+  pg-admin-password: "zxsk@34#$"
+  pg-password: "zxsk@34#$"
+  doris-password: "zxsk@34#$"
+  doris-root-password: ""
+  nebula-root-password: "nebula"
+  nebula-password: "zxsk@34#$"
+---
+# =============================================================================
+# PostgreSQL 账号 secapp_rw
+# =============================================================================
+# 授予的权限（无 DELETE / TRUNCATE）：
+#   CONNECT                 —— 允许连接 postgres 库
+#   USAGE ON SCHEMA         —— 允许访问 schema public
+#   SELECT, INSERT, UPDATE  —— 表的读和写
+#   序列 USAGE/SELECT/UPDATE —— 支持自增主键取值
+#   ALTER DEFAULT PRIVILEGES —— postgres 用户今后新建的表/序列自动继承上述权限
+#
+# 注意事项：
+#   1. 表 OWNER 和超级用户不受 GRANT 限制。若业务表 owner 就是业务自己的账号，
+#      该账号天然可 DELETE 自己的表，需改用无删除权限的专用账号做日常读写。
+#   2. ALTER DEFAULT PRIVILEGES 只对"执行这条语句的角色（postgres）"今后创建的
+#      对象生效；其他账号创建的表需要由该账号自己执行 ALTER DEFAULT PRIVILEGES。
+#   3. 当前只授权了 database postgres 的 schema public。若业务数据在其他库/模式，
+#      需按同样模式对目标库补授权，模板：
+#        GRANT CONNECT ON DATABASE <db> TO secapp_rw;
+#        \c <db>
+#        GRANT USAGE ON SCHEMA <schema> TO secapp_rw;
+#        GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA <schema> TO secapp_rw;
+#        ALTER DEFAULT PRIVILEGES IN SCHEMA <schema> GRANT SELECT, INSERT, UPDATE ON TABLES TO secapp_rw;
+#
+# 【如需放开其他权限的建议语句】
+#   删除数据：  GRANT DELETE ON ALL TABLES IN SCHEMA public TO secapp_rw;
+#   清空表：    GRANT TRUNCATE ON ALL TABLES IN SCHEMA public TO secapp_rw;
+#   建表：      GRANT CREATE ON SCHEMA public TO secapp_rw;
+#   改表结构：  （PostgreSQL 无独立 ALTER 权限，DDL 需表 owner 或先 GRANT CREATE+将表 owner 变更）
+#   回收权限：  REVOKE INSERT ON ALL TABLES IN SCHEMA public FROM secapp_rw;
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-pg-user
+  namespace: secpaas
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: psql
+          # 复用集群内已在运行的 postgis 镜像（自带 psql），无需外网拉取
+          image: harbor.zxsk.dfp:8443/secpaas/postgis:17-3.5
+          env:
+            - name: PGADMIN_PW
+              valueFrom:
+                secretKeyRef:
+                  name: secpaas-db-users
+                  key: pg-admin-password
+            - name: APP_PW
+              valueFrom:
+                secretKeyRef:
+                  name: secpaas-db-users
+                  key: pg-password
+          command:
+            - bash
+            - -ec
+            - |
+              export PGPASSWORD="$PGADMIN_PW"
+              psql -h postgresql-headless.secpaas.svc -p 5432 -U postgres -d postgres \
+                   -v ON_ERROR_STOP=1 -v app_pw="$APP_PW" <<'SQL'
+              -- 幂等：账号不存在才创建
+              SELECT format('CREATE ROLE secapp_rw LOGIN PASSWORD %L', :'app_pw')
+              WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'secapp_rw') \gexec
+              -- 重跑时同步密码
+              ALTER ROLE secapp_rw WITH LOGIN PASSWORD :'app_pw';
+
+              GRANT CONNECT ON DATABASE postgres TO secapp_rw;
+              GRANT USAGE ON SCHEMA public TO secapp_rw;
+              GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO secapp_rw;
+              GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO secapp_rw;
+              ALTER DEFAULT PRIVILEGES IN SCHEMA public
+                GRANT SELECT, INSERT, UPDATE ON TABLES TO secapp_rw;
+              ALTER DEFAULT PRIVILEGES IN SCHEMA public
+                GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO secapp_rw;
+              SQL
+              echo "PostgreSQL 用户 secapp_rw 创建/授权完成"
+---
+# =============================================================================
+# Redis cluster：按需求暂不做 ACL 权限控制，本文件不创建用户、不修改配置。
+#
+# 现状说明（2026-09）：
+#   曾通过 create-redis-user Job 在 6 个节点执行过 ACL SETUSER，账号 secapp_rw
+#   目前仍存在且规则生效（实测：SET/GET 正常，DEL 返回 NOPERM）。但该集群未配置
+#   aclfile，ACL 不跨节点同步、Pod 重建后即丢失，因此按当前需求不再维护。
+#
+# 如需彻底移除该账号（6 个节点都要执行）：
+#   redis-cli -c -h redis-cluster-<i>.redis-cluster-headless.secpaas.svc \
+#     -a '<管理员密码>' ACL DELUSER secapp_rw
+#
+# 将来如需恢复 ACL 权限控制（读写、无删除），要点：
+#   1. ACL 不跨节点同步，须对 redis-cluster-0..5 逐一执行：
+#        ACL SETUSER secapp_rw on >'<密码>' '~*' '&*' \
+#          +@read +@write -@dangerous \
+#          -DEL -UNLINK -GETDEL -COPY -MOVE -RESTORE -MIGRATE -SWAPDB
+#      删除类命令属于 @write，必须紧跟 +@write 之后负向排除；
+#      FLUSHALL/FLUSHDB 由 -@dangerous 覆盖；SET 覆盖写值无法阻止。
+#   2. 持久化：集群未配置 aclfile（ACL SAVE 会报错），需把 user 指令写进
+#      ConfigMap redis-cluster-default 的 redis-default.conf（密码用 SHA-256
+#      哈希 #<hash> 形式），再 rollout restart sts redis-cluster。
+#      本地 redis-cluster-default-patched.yaml 即按此方式生成（哈希对应旧密码，
+#      复用前需按新密码重新生成）。
+# =============================================================================
+
+# =============================================================================
+# Doris 账号 secapp_rw（SELECT + LOAD）
+# =============================================================================
+# 授予的权限：
+#   SELECT_PRIV —— 查询库表数据
+#   LOAD_PRIV   —— 导入/写入数据（INSERT、Stream Load、Broker Load 等）
+#
+# 【重要限制】Doris 的 DELETE 语句依赖 LOAD_PRIV，因此授予 LOAD_PRIV 后
+#   该用户可以执行 DELETE。Doris 经典权限模型没有独立的"删除数据"权限，
+#   这是用户已确认接受的限制。TRUNCATE/DROP/ALTER 不在授权范围内。
+#
+# 注意事项：
+#   *.*.* 表示所有 catalog/库/表。若要收敛到具体库：
+#     GRANT SELECT_PRIV, LOAD_PRIV ON internal.<db>.* TO secapp_rw;
+#
+# 【如需放开其他权限的建议语句】
+#   建库建表：  GRANT CREATE_PRIV ON *.*.* TO secapp_rw;
+#   改表结构：  GRANT ALTER_PRIV  ON *.*.* TO secapp_rw;
+#   删库删表：  GRANT DROP_PRIV   ON *.*.* TO secapp_rw;   （危险，不建议）
+#   转授权限：  GRANT GRANT_PRIV  ON *.*.* TO secapp_rw;   （危险，不建议）
+#   查看权限：  SHOW GRANTS FOR secapp_rw;
+#   回收账号：  DROP USER secapp_rw;
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-doris-user
+  namespace: secpaas
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: mysql-client
+          # 复用集群内 FE 镜像（自带 mysql 8.0 客户端）
+          image: harbor.zxsk.dfp:8443/apache/doris:fe-4.1.3
+          env:
+            - name: DORIS_ROOT_PW
+              valueFrom:
+                secretKeyRef:
+                  name: secpaas-db-users
+                  key: doris-root-password
+            - name: APP_PW
+              valueFrom:
+                secretKeyRef:
+                  name: secpaas-db-users
+                  key: doris-password
+          command:
+            - bash
+            - -ec
+            - |
+              mysql -h doriscluster-zxsk-fe-service.secpaas.svc -P 9030 -uroot \
+                    ${DORIS_ROOT_PW:+-p"$DORIS_ROOT_PW"} --connect-timeout=10 <<SQL
+              CREATE USER IF NOT EXISTS secapp_rw IDENTIFIED BY '${APP_PW}';
+              ALTER USER secapp_rw IDENTIFIED BY '${APP_PW}';
+              GRANT SELECT_PRIV, LOAD_PRIV ON *.*.* TO secapp_rw;
+              SHOW GRANTS FOR secapp_rw;
+              SQL
+              echo "Doris 用户 secapp_rw 创建/授权完成"
+---
+# =============================================================================
+# Nebula Graph 账号 secapp_rw（GUEST 角色 = 只读）
+# =============================================================================
+# 授予的权限（GUEST 角色，作用域为 space zxsk_csp_siocc）：
+#   USE <space>、GO/FETCH/LOOKUP/FIND/SHOW 等全部读操作
+#   不含：INSERT/DELETE/UPDATE（写图）、CREATE/DROP/ALTER SPACE 或 TAG/EDGE（DDL）、
+#         CREATE USER/GRANT（用户管理）
+#
+# 注意事项：
+#   1. Nebula 角色是按 space 授予的。当前集群只有 space zxsk_csp_siocc；
+#      今后新建 space 需补授权，模板（需 root 执行）：
+#        GRANT ROLE GUEST ON <space> TO secapp_rw;
+#   2. 如需放开其他权限（需 root 执行）：
+#        只读升级为可读写：    GRANT ROLE USER  ON zxsk_csp_siocc TO secapp_rw;
+#        可做 DDL（建TAG/边）：GRANT ROLE DBA  ON zxsk_csp_siocc TO secapp_rw;
+#        space 级管理：        GRANT ROLE ADMIN ON zxsk_csp_siocc TO secapp_rw;
+#        查看当前角色：        SHOW ROLES ON zxsk_csp_siocc;
+#        回收角色：            REVOKE ROLE GUEST ON zxsk_csp_siocc FROM secapp_rw;
+#        删除账号：            DROP USER secapp_rw;
+#   3. 本 Job 幂等：重复执行会跳过已存在的用户，并容忍"已授予"报错。
+#
+# 开启认证的步骤（本 Job 执行完后再做，顺序不能反）：
+#   1) 先跑本 Job：认证关闭时创建 secapp_rw 并授予 GUEST（root 密码保持默认
+#      的 nebula 不变，CR 的 spec.console.password 也维持 nebula，无需改动）
+#   2) 修改 secpaas-yaml/nebula-02-cluster.yaml（NebulaCluster CR）：
+#        graphd 段新增 config（若已有 config 则只加一行）：
+#          config:
+#            enable_authorize: "true"
+#      然后 kubectl apply 该 CR，operator 会重建 graphd ConfigMap 并滚动重启 graphd
+#
+#   【安全提醒】root 默认密码 nebula 是公开值，开启认证后等于任何人都能用
+#   root/nebula 登录拿到全部权限。如后续要加固，执行：
+#     CHANGE PASSWORD root FROM "nebula" TO "<新密码>";   -- root 登录后执行
+#   并同步修改 CR 的 spec.console.password 和本文件 Secret 的 nebula-root-password。
+#   3) 验证：错误密码登录被拒绝；secapp_rw 正确密码可读、写操作报权限错误
+#
+# 注意：开启认证后所有 Nebula 客户端都必须携带 账号+密码 才能访问，
+#       业务方需同步将连接配置改为 secapp_rw / 对应密码（或申请 root）。
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-nebula-user
+  namespace: secpaas
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: nebula-console
+          # 复用集群内 nebula-console Pod 的镜像（自带 nebula-console 客户端）
+          image: harbor.zxsk.dfp:8443/secpaas/nebula-console:latest
+          env:
+            - name: ROOT_PW
+              valueFrom:
+                secretKeyRef:
+                  name: secpaas-db-users
+                  key: nebula-root-password
+            - name: APP_PW
+              valueFrom:
+                secretKeyRef:
+                  name: secpaas-db-users
+                  key: nebula-password
+          command:
+            - sh
+            - -ec
+            - |
+              ADDR="nebula-graphd-svc.secpaas.svc"
+              PORT="9669"
+              C="nebula-console -addr $ADDR -port $PORT -u root -p $ROOT_PW -e"
+
+              # 等待 graphd 就绪且 root 可登录（认证开启前 SHOW SPACES 也能成功，
+              # 故以 root+密码能执行为准；密码错则立即失败不空等）
+              i=0
+              while [ $i -lt 60 ]; do
+                OUT=$(nebula-console -addr $ADDR -port $PORT -u root -p "$ROOT_PW" \
+                  -e "SHOW SPACES" 2>&1) && break
+                case "$OUT" in
+                  *Invalid*password*|*Bad*username*|*Permission*denied*)
+                    echo "[FAIL] 集群已就绪但 root 凭证被拒绝：$OUT"; exit 1 ;;
+                esac
+                echo "等待 nebula graphd 就绪..."; sleep 10; i=$((i+1))
+              done
+              [ $i -lt 60 ] || { echo "[FAIL] 等待超时：graphd 未就绪"; exit 1; }
+              echo "[OK]   nebula 集群就绪（root 认证通过）"
+
+              echo "== 创建用户 secapp_rw（已存在则跳过）=="
+              $C "CREATE USER IF NOT EXISTS secapp_rw WITH PASSWORD '$APP_PW'"
+
+              echo "== 同步 secapp_rw 密码（重跑时保持一致）=="
+              $C "ALTER USER secapp_rw WITH PASSWORD '$APP_PW'"
+
+              echo "== 授予 GUEST 角色（只读）@ zxsk_csp_siocc =="
+              $C "GRANT ROLE GUEST ON zxsk_csp_siocc TO secapp_rw" \
+                || echo "[提示] 授予可能已存在（Existed!），继续"
+
+              echo "== 校验：secapp_rw 的角色 =="
+              nebula-console -addr $ADDR -port $PORT -u root -p $ROOT_PW \
+                -e "SHOW ROLES IN zxsk_csp_siocc" | grep -E 'secapp_rw|Account' \
+                || echo "[警告] 未查到 secapp_rw 角色，请人工检查"
+
+              echo "Nebula 用户 secapp_rw 创建/授权完成"
+# =============================================================================

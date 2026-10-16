@@ -1,0 +1,238 @@
+# =============================================================================
+# secpaas 命名空间 Milvus 读写账号创建（secapp_rw + 自定义角色 secapp_ro）
+#
+# 使用方法（03-cluster 与本 Job 可一次性同时 apply，无需等待集群就绪）：
+#   1. milvus-03-cluster.yaml 必须已包含认证开关（config 下平铺的
+#      security.authorizationEnabled 与 common.security.authorizationEnabled
+#      均为 true），否则授权类 REST 接口会报 "fail to get authorization
+#      from the md"（认证关闭时该类接口不可用）
+#   2. kubectl apply -f milvus-03-cluster.yaml -f 本文件
+#      本 Job 自动轮询等待"proxy 就绪 且 认证已生效"（最长 10 分钟；
+#      超时 Failed 后重新 apply 重跑即可，脚本幂等）
+#   3. kubectl -n secpaas get jobs -w   等待 Job create-milvus-user Completed
+#   4. kubectl -n secpaas logs job/create-milvus-user 查看执行结果与权限列表
+#
+# 对已运行集群补充开启认证的影响：
+#   * apply 修改后的 milvus-03-cluster.yaml 会导致 Milvus 全部组件滚动重启，
+#     期间有秒级到分钟级的服务抖动
+#   * 认证生效后所有未带账号密码的存量客户端会立即鉴权失败，业务方需先
+#     改连接配置（root/Milvus 或 secapp_rw/<密码>）再开认证
+#   * 回滚：删除 spec.config.milvus.yaml 段并重新 apply 即关闭认证
+#
+# 超级用户说明（P0 整改，STD-SEC-001 DB-ACC-03/04）：
+#   本 Job 在认证生效后自动把 root 密码从出厂默认 "Milvus" 改为 Secret 的
+#   milvus-root-password（deploy.sh 由 deploy.env 的 MILVUS_ROOT_PASSWORD 替换，
+#   各环境必须不同）。幂等：重跑时若新密码已生效则跳过改密。
+#   注意：改密后 root/Milvus 立即失效，运维脚本需改用新密码。
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 密码。milvus-root-password 会被 deploy.sh 替换为目标 root 密码（不得保留
+# 出厂默认 Milvus）；milvus-password 为业务账号 secapp_rw 密码
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: Secret
+metadata:
+  name: secpaas-milvus-user
+  namespace: secpaas
+type: Opaque
+stringData:
+  milvus-root-password: "Milvus"
+  milvus-password: "zxsk@34#$"
+---
+# =============================================================================
+# Milvus 账号 secapp_rw（自定义角色 secapp_ro，读 + 写数据，无 DDL/运维权限）
+# =============================================================================
+# secapp_ro 授予的权限（dbName=* / collectionName=*，即全库）：
+#   全局：ListDatabases
+#   库级：DescribeDatabase、ShowCollections
+#   集合：Query、Search、DescribeCollection、DescribeAlias、HasPartition、
+#         ShowPartitions、GetStatistics、IndexDetail、GetFlushState、
+#         GetLoadState、GetLoadingProgress、ListAliases
+#   写数据：Insert、Delete、Upsert、Import
+# 不含：Load/Release/CreateCollection/DropCollection/CreateIndex/Flush/
+#       Compaction 等 DDL 与集群运维类权限（仅读写数据，不管集合生命周期）
+# 权限名以 2.5.13 实测有效为准（privilege_groups/list 内置组的成员名）：
+#   点查属于 Query（无 "Get" 这个权限名）；查看索引是 IndexDetail（不是
+#   DescribeIndex/GetIndexStats）；Load/Release 是写权限，只读角色不授。
+#
+# 注意事项：
+#   1. Milvus 2.5.13 无内置 db_ro 角色（仅 admin/public，public 几乎无权限），
+#      故自建角色 secapp_ro 逐一授权。
+#   2. 本 Job 幂等：重复执行会跳过已存在的角色/用户，重复授权无害。
+#   3. 镜像复用 Milvus 依赖的 pulsar 镜像（自带 python3，用标准库 urllib
+#      调 Milvus RESTful v2 API，无需 curl/pymilvus）。
+#
+# 【如需放开其他权限的建议方式】（root 身份调用同款 REST 接口）：
+#   写数据：    已放开 Insert、Delete、Upsert、Import（在下方 PRIVS 中）
+#   建/删集合： 加 CreateCollection、DropCollection（全局）
+#   建索引：    加 CreateIndex、DropIndex
+#   刷盘/压缩： 加 Flush、Compaction
+#   查看权限：  POST /v2/vectordb/roles/describe  {"roleName":"secapp_ro"}
+#   回收权限：  POST /v2/vectordb/roles/revoke_privilege_v2
+#               {"roleName":"secapp_ro","privilege":"<同款>","dbName":"*","collectionName":"*"}
+#   解绑角色：  POST /v2/vectordb/users/ungrant_role {"userName":"secapp_rw","roleName":"secapp_ro"}
+#   删除账号：  POST /v2/vectordb/users/drop {"userName":"secapp_rw"}
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-milvus-user
+  namespace: secpaas
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: milvus-rest
+          # 复用 Milvus 集群自带的 pulsar 镜像（内置 python3）
+          image: harbor.zxsk.dfp:8443/secpaas/pulsar:3.0.7
+          env:
+            - name: ROOT_PW
+              valueFrom:
+                secretKeyRef:
+                  name: secpaas-milvus-user
+                  key: milvus-root-password
+            - name: APP_PW
+              valueFrom:
+                secretKeyRef:
+                  name: secpaas-milvus-user
+                  key: milvus-password
+          command:
+            - python3
+            - -c
+            - |
+              import json
+              import os
+              import sys
+              import time
+              import urllib.error
+              import urllib.request
+
+              ADDR = "sino-release-milvus.secpaas.svc"
+              PORT = "19530"
+              ROOT_PW = os.environ["ROOT_PW"]
+              DEFAULT_ROOT_PW = "Milvus"
+              APP_PW = os.environ["APP_PW"]
+              TOKEN = "root:" + ROOT_PW
+
+              def _req(url, payload, headers):
+                  req = urllib.request.Request(
+                      url, data=json.dumps(payload).encode(),
+                      headers=headers)
+                  try:
+                      with urllib.request.urlopen(req, timeout=15) as r:
+                          return json.loads(r.read().decode())
+                  except urllib.error.HTTPError as e:
+                      # 认证开启后无凭证访问返回 HTTP 401，响应体即 {"code":1800,...}
+                      try:
+                          return json.loads(e.read().decode())
+                      except Exception:
+                          return {"code": -1, "message": "HTTP %s" % e.code}
+                  except Exception as e:
+                      return {"code": -1, "message": str(e)}
+
+              def api(path, payload, token=None):
+                  return _req("http://%s:%s/v2/vectordb/%s" % (ADDR, PORT, path),
+                              payload,
+                              {"Content-Type": "application/json",
+                               "Authorization": "Bearer " + (token or TOKEN)})
+
+              def api_noauth(path, payload):
+                  # 不带凭证的探测：认证已开启时应返回 code 1800
+                  return _req("http://%s:%s/v2/vectordb/%s" % (ADDR, PORT, path),
+                              payload,
+                              {"Content-Type": "application/json"})
+
+              def run(desc, path, payload, fatal=True, token=None):
+                  # token 可覆盖 bearer；root 改密前集群仍是旧密码，必须用
+                  # 旧密码认证，默认 TOKEN（新密码）会报 1800 未认证
+                  r = api(path, payload, token=token)
+                  # 2.5.13 实测：update_password 的 payload 必须带 password 字段
+                  # 且值为【当前旧密码】（服务端用它校验凭证），填新密码会报
+                  # 1400 "old password not correct"（oldPassword 字段不参与校验）
+                  msg = str(r.get("message", ""))
+                  if r.get("code") == 0:
+                      print("[OK]   " + desc)
+                  elif "already" in msg.lower() or "existed" in msg.lower():
+                      print("[SKIP] %s (%s)" % (desc, msg))
+                  elif fatal:
+                      print("[FAIL] %s -> %s" % (desc, r))
+                      sys.exit(1)
+                  else:
+                      print("[WARN] %s -> %s" % (desc, r))
+                  return r
+
+              # 等待 proxy 就绪且认证已开启：
+              #   - 连接失败/超时            -> 集群未就绪，继续等
+              #   - 无凭证探测返回 code 0    -> 认证未开启（config 未生效/未重启），继续等并提示
+              #   - 无凭证探测返回 code 1800 -> 认证已生效，就绪
+              for _ in range(60):
+                  r_probe = api_noauth("users/list", {})
+                  if r_probe.get("code") == 1800:
+                      break
+                  if r_probe.get("code") == 0:
+                      print("警告: proxy 已就绪但认证未开启，等待 config 生效/pod 重启...")
+                  else:
+                      print("等待 milvus 集群就绪: %s" % r_probe)
+                  time.sleep(10)
+              else:
+                  print("[FAIL] 等待超时：proxy 未就绪或认证始终未开启")
+                  sys.exit(1)
+              # P0 整改：root 改密（幂等）。先用目标密码登录；失败则用出厂默认
+              # "Milvus" 登录并改密；两者都失败说明密码与预期不符，报错退出。
+              def login_ok(pw):
+                  r = api("users/list", {}, token="root:" + pw)
+                  return r.get("code") == 0
+
+              if login_ok(ROOT_PW):
+                  print("[SKIP] root 已使用目标密码，无需改密")
+              elif login_ok(DEFAULT_ROOT_PW):
+                  run("修改 root 默认密码", "users/update_password",
+                      {"userName": "root", "oldPassword": DEFAULT_ROOT_PW,
+                       "newPassword": ROOT_PW, "password": DEFAULT_ROOT_PW},
+                      token="root:" + DEFAULT_ROOT_PW)
+                  if not login_ok(ROOT_PW):
+                      print("[FAIL] root 改密后新密码登录失败")
+                      sys.exit(1)
+                  print("[OK]   root 新密码验证通过")
+              else:
+                  print("[FAIL] root 凭证不可用：既不是目标密码也不是出厂默认 "
+                        "Milvus（可能已手工改过），请核对 Secret 的 "
+                        "milvus-root-password")
+                  sys.exit(1)
+
+              run("创建只读角色 secapp_ro", "roles/create",
+                  {"roleName": "secapp_ro"}, fatal=False)
+
+              PRIVS = [
+                  "ListDatabases", "DescribeDatabase", "ShowCollections",
+                  "DescribeCollection", "DescribeAlias", "HasPartition",
+                  "ShowPartitions", "GetStatistics", "Query", "Search",
+                  "IndexDetail", "GetFlushState", "GetLoadState",
+                  "GetLoadingProgress", "ListAliases",
+                  "Insert", "Delete", "Upsert", "Import",
+              ]
+              for p in PRIVS:
+                  run("授权 %s" % p, "roles/grant_privilege_v2",
+                      {"roleName": "secapp_ro", "privilege": p,
+                       "dbName": "*", "collectionName": "*"})
+
+              run("创建用户 secapp_rw", "users/create",
+                  {"userName": "secapp_rw", "password": APP_PW}, fatal=False)
+              # 重跑时同步密码（oldPassword 不匹配会报错，容忍）
+              run("同步 secapp_rw 密码", "users/update_password",
+                  {"userName": "secapp_rw", "oldPassword": APP_PW,
+                   "newPassword": APP_PW, "password": APP_PW}, fatal=False)
+              run("绑定 secapp_rw -> secapp_ro", "users/grant_role",
+                  {"userName": "secapp_rw", "roleName": "secapp_ro"},
+                  fatal=False)
+
+              print("== secapp_ro 权限列表 ==")
+              print(json.dumps(api("roles/describe", {"roleName": "secapp_ro"}),
+                              ensure_ascii=False))
+              print("== secapp_rw 角色绑定 ==")
+              print(json.dumps(api("users/describe", {"userName": "secapp_rw"}),
+                              ensure_ascii=False))
+              print("Milvus 用户 secapp_rw 创建/授权完成")
