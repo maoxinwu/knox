@@ -1,0 +1,367 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.knox.gateway.provider.federation.jwt.filter;
+
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.Locale;
+import java.util.Optional;
+import java.util.regex.Pattern;
+import org.eclipse.jetty.util.URIUtil;
+
+/**
+ * The pieces of a single "aud" claim entry, as parsed in either of the two forms this class
+ * supports: the <b>custom form</b>,
+ * {@code https://host[:port]/[skipped-segments/]namespace/service-name[/resource-path]}
+ * ({@link #parseCustomForm(String, String)}), or the <b>DNS form</b>,
+ * {@code https://<service>[.<namespace>[.svc[.<cluster-domain>]]][:port][/resource-path]}
+ * ({@link #parseDnsForm(String, String)}). Both parse methods return this same record, since
+ * {@code namespace}, {@code serviceName}, {@code resourcePathRaw} and {@code resourcePathEncoded}
+ * mean the same thing for either form; {@code host} and {@code effectivePort} are meaningful only
+ * for a custom-form result -- a DNS-form result carries no separate cluster-domain host or
+ * retained port, so it sets {@code host} to {@code null} and {@code effectivePort} to {@code -1}.
+ * See each parse method's javadoc for the form it accepts.
+ *
+ * <p>The optional {@code skipped-segments} prefix in the custom form gives an {@code aud} entry
+ * more flexibility in case it's needed for network routing. When
+ * {@link #parseCustomForm(String, String)} is given a non-blank {@code pathPrefix}, the path is
+ * searched, as a plain literal substring with no decoding, for the first (leftmost) place
+ * {@code "/" + pathPrefix + "/"} occurs; namespace, service-name and resource-path parsing then
+ * resumes right after it, at that shared "/". Everything up to and including it is discarded
+ * unparsed: {@code pathPrefix} only locates where the parse resumes, and is otherwise not
+ * validated or retained. {@code pathPrefix} is ordinarily a single path segment, but it may
+ * itself contain "/" to require several contiguous segments as one indivisible token. An entry
+ * whose path never contains it does not parse, the same as any other ill-shaped entry. A
+ * {@code null} or blank {@code pathPrefix} disables the search entirely: the path must begin
+ * with namespace and service-name straight after the authority. The DNS form has no leading
+ * segments to skip -- its whole path is always the resource path -- so {@code pathPrefix} plays
+ * no part in {@link #parseDnsForm(String, String)}.
+ *
+ * <p>Host, namespace, and service-name are lower-cased at parse time, since all three are
+ * compared case-insensitively against trusted-header-derived values; this keeps that comparison
+ * a plain, symmetric {@code equals} wherever it happens, rather than an {@code equalsIgnoreCase}
+ * that every comparison site has to remember to use. The resource path is compared
+ * case-sensitively, so it is left exactly as it stood in the entry.
+ *
+ * <p>The resource path is kept in both of its comparison forms -- exactly as it stood in the
+ * entry, and percent-encoded -- since a match against either form is acceptable. Namespace and
+ * service-name are read once, from the raw path or host, with no encoded counterpart: a real
+ * destination's namespace and service name are always valid DNS labels, which never contain a
+ * character an encoder would touch, so parsing does not need to validate that they are -- a value
+ * that is not a valid label simply will not match a real namespace or service name.
+ *
+ * <p>An aud entry for a delegation token is requested by the service that is about to call the
+ * destination it describes, so a value that escapes some characters but not others within the same
+ * resource path is out of scope: a path is treated as already encoded the moment it contains any
+ * {@code %XY} escape, even if it also contains unencoded characters.
+ */
+public record AudienceResource(String host, int effectivePort, String namespace, String serviceName,
+    String resourcePathRaw, String resourcePathEncoded) {
+
+  private static final Pattern PERCENT_ENCODED_OCTET = Pattern.compile("%[0-9A-Fa-f]{2}");
+  static final int DEFAULT_HTTPS_PORT = 443;
+
+  /**
+   * Parses a single {@code aud} claim entry in the custom form. Returns {@link Optional#empty()}
+   * for any entry that is not a well-formed
+   * {@code https://host[:port]/[skipped-segments/]namespace/service-name[/resource-path]} URL --
+   * including a {@code null} or blank entry, a non-{@code https} scheme, a missing or
+   * userinfo-carrying authority, a path that never contains a non-blank {@code pathPrefix},
+   * fewer than two path segments once past any such prefix, or a resource path that is not
+   * already in RFC 3986 remove_dot_segments normal form -- rather than throwing. The result's
+   * {@code host} and {@code effectivePort} are always set, unlike a {@link #parseDnsForm(String,
+   * String)} result.
+   *
+   * <p>See the class javadoc for exactly how {@code pathPrefix} is searched for and consumed.
+   *
+   * <p>A {@code ?query} or {@code #fragment} on the entry is discarded before the path is parsed,
+   * so it plays no part in {@code pathPrefix} matching or in the resulting resource path.
+   *
+   * @param audEntry the raw {@code aud} claim entry to parse
+   * @param pathPrefix the leading path segment(s) to search for and skip past, as described
+   *     above, or {@code null}/blank to require namespace and service-name to begin straight
+   *     after the authority
+   * @return the parsed result, or {@link Optional#empty()} if {@code audEntry} is not a
+   *     well-formed custom-form URL as described above
+   */
+  public static Optional<AudienceResource> parseCustomForm(String audEntry, String pathPrefix) {
+    if (audEntry == null) {
+      return Optional.empty();
+    }
+    final String entry = audEntry.trim();
+    if (entry.isEmpty()) {
+      return Optional.empty();
+    }
+
+    final int schemeSep = entry.indexOf("://");
+    if (schemeSep <= 0 || !"https".equalsIgnoreCase(entry.substring(0, schemeSep))) {
+      return Optional.empty();
+    }
+
+    final int pathStart = indexOfAuthorityEnd(entry, schemeSep + 3);
+    if (pathStart >= entry.length() || entry.charAt(pathStart) != '/') {
+      return Optional.empty();
+    }
+    final String authorityPart = entry.substring(0, pathStart);
+    String rawPath = entry.substring(pathStart);
+    final int queryOrFragment = indexOfFirst(rawPath, 0, '?', '#');
+    if (queryOrFragment >= 0) {
+      rawPath = rawPath.substring(0, queryOrFragment);
+    }
+
+    // authorityPart comes from entry.substring(...), which never returns null, so
+    // URISyntaxException is the only exception new URI(String) can throw here.
+    final URI uri;
+    try {
+      uri = new URI(authorityPart);
+    } catch (URISyntaxException e) {
+      return Optional.empty();
+    }
+    if (uri.getUserInfo() != null || uri.getHost() == null) {
+      return Optional.empty();
+    }
+    final int explicitPort = uri.getPort();
+    final int effectivePort = explicitPort < 0 ? DEFAULT_HTTPS_PORT : explicitPort;
+
+    if (pathPrefix != null && !pathPrefix.isBlank()) {
+      final String needle = "/" + pathPrefix + "/";
+      final int found = rawPath.indexOf(needle);
+      if (found < 0) {
+        return Optional.empty();
+      }
+      rawPath = rawPath.substring(found + needle.length() - 1);
+    }
+
+    final Optional<ResourceShape> shape = parseShape(rawPath);
+    if (shape.isEmpty()) {
+      return Optional.empty();
+    }
+    final ResourceShape resource = shape.get();
+    final String resourcePathRaw = resource.resourcePath();
+    final String resourcePathEncoded = PERCENT_ENCODED_OCTET.matcher(resourcePathRaw).find()
+        ? resourcePathRaw
+        : URIUtil.encodePath(resourcePathRaw);
+
+    return Optional.of(new AudienceResource(uri.getHost().toLowerCase(Locale.ROOT), effectivePort,
+        resource.namespace(), resource.serviceName(), resourcePathRaw, resourcePathEncoded));
+  }
+
+  private record ResourceShape(String namespace, String serviceName, String resourcePath) {
+  }
+
+  private static Optional<ResourceShape> parseShape(String rawPath) {
+    final String[] segments = rawPath.substring(1).split("/", -1);
+    if (segments.length < 2) {
+      return Optional.empty();
+    }
+    final String namespace = segments[0].toLowerCase(Locale.ROOT);
+    final String serviceName = segments[1].toLowerCase(Locale.ROOT);
+    final StringBuilder remainder = new StringBuilder();
+    for (int i = 2; i < segments.length; i++) {
+      remainder.append('/').append(segments[i]);
+    }
+    final Optional<String> tidied = normalizeAndTidy(remainder.toString());
+    if (tidied.isEmpty()) {
+      return Optional.empty();
+    }
+    return Optional.of(new ResourceShape(namespace, serviceName, tidied.get()));
+  }
+
+  /**
+   * Requires the path to already be in RFC 3986 remove_dot_segments normal form and to contain no
+   * empty segment, rejecting it otherwise rather than normalizing it; the only change made is
+   * giving the path exactly one leading "/" and removing a trailing "/" that is not the root path
+   * itself, since a difference in trailing slash alone must not be treated as a mismatch.
+   */
+  static Optional<String> normalizeAndTidy(String rawPath) {
+    if (rawPath == null) {
+      return Optional.empty();
+    }
+    final String path = rawPath.startsWith("/") ? rawPath : "/" + rawPath;
+    final String rest = path.substring(1);
+    if (rest.isEmpty()) {
+      return Optional.of("/");
+    }
+    final String[] segments = rest.split("/", -1);
+    int segmentCount = segments.length;
+    if (segments[segmentCount - 1].isEmpty()) {
+      segmentCount--;
+    }
+    final StringBuilder tidied = new StringBuilder();
+    for (int i = 0; i < segmentCount; i++) {
+      final String segment = segments[i];
+      if (segment.isEmpty() || ".".equals(segment) || "..".equals(segment)) {
+        return Optional.empty();
+      }
+      tidied.append('/').append(segment);
+    }
+    return Optional.of(tidied.toString());
+  }
+
+  /**
+   * The index where the authority of {@code entry}, which begins at {@code authorityStart}, ends:
+   * the first {@code '/'}, {@code '?'} or {@code '#'} at or after it, or {@code entry.length()}
+   * if there is none. The path can only begin at a {@code '/'} found here, so a {@code '/'} that
+   * appears later, inside a query or fragment, is never mistaken for the start of the path.
+   */
+  private static int indexOfAuthorityEnd(String entry, int authorityStart) {
+    for (int i = authorityStart; i < entry.length(); i++) {
+      final char c = entry.charAt(i);
+      if (c == '/' || c == '?' || c == '#') {
+        return i;
+      }
+    }
+    return entry.length();
+  }
+
+  /**
+   * The first index at or after {@code fromIndex} where either {@code a} or {@code b} occurs, or
+   * {@code -1} if neither does. Shared by {@link K8sDestinationAudienceValidator} for stripping a
+   * query string or fragment off of a request path taken from a header.
+   */
+  static int indexOfFirst(String value, int fromIndex, char a, char b) {
+    final int idxA = value.indexOf(a, fromIndex);
+    final int idxB = value.indexOf(b, fromIndex);
+    if (idxA < 0) {
+      return idxB;
+    }
+    if (idxB < 0) {
+      return idxA;
+    }
+    return Math.min(idxA, idxB);
+  }
+
+  /**
+   * Parses a single {@code aud} claim entry as the alternate, DNS-shaped destination URL whose
+   * host is {@code <service>.<namespace>.svc.<cluster-domain>}, truncated at a label boundary
+   * from the right -- the same shortening an ordinary DNS resolver search path allows. Returns
+   * {@link Optional#empty()} for any entry that is not a well-formed URL of that shape --
+   * including a {@code null} or blank entry, a non-{@code https} scheme, a missing or
+   * userinfo-carrying authority, a host with a trailing {@code "."}, an empty host label, a host
+   * of three or more labels whose third label is not literally {@code "svc"}, a host whose labels
+   * past {@code "svc"} are not a label-boundary prefix of {@code clusterDomain} taken from its
+   * left, or a resource path that is not already in RFC 3986 remove_dot_segments normal form.
+   *
+   * <p>The result's {@code namespace} is {@code null} when the host is a single label (service
+   * name only); a namespace-less host has no destination-namespace information of its own, and it
+   * is entirely up to the caller matching this result to decide what, if anything, it is compared
+   * against. {@code host} and {@code effectivePort} are not meaningful for a DNS-form result and
+   * are always set to {@code null} and {@code -1} respectively -- the cluster-domain host and any
+   * port in the entry are consumed only to parse the authority and are not retained; see the next
+   * paragraph for why the port specifically is discarded.
+   *
+   * <p>The port, when present, is parsed only so that it does not break parsing of the rest of the
+   * authority. It is then discarded rather than retained in the result: a mesh or sidecar in front
+   * of the destination may rewrite the port in flight, so pinning it here would risk rejecting a
+   * correctly-routed request.
+   *
+   * <p>The resource path here is never prefix-searched the way {@link #parseCustomForm(String,
+   * String)}'s is: a DNS-form entry has nowhere else for namespace and service-name to live, so
+   * the whole path -- after tidying -- is the resource path.
+   *
+   * <p>A {@code ?query} or {@code #fragment} on the entry is discarded before the path is parsed,
+   * exactly as in {@link #parseCustomForm(String, String)}.
+   *
+   * @param audEntry the raw {@code aud} claim entry to parse
+   * @param clusterDomain the cluster domain a host of three or more labels must truncate to a
+   *     label-boundary prefix of, past the required {@code "svc"} label, as described above
+   * @return the parsed result, or {@link Optional#empty()} if {@code audEntry} is not a
+   *     well-formed DNS-form URL as described above
+   */
+  static Optional<AudienceResource> parseDnsForm(String audEntry, String clusterDomain) {
+    if (audEntry == null) {
+      return Optional.empty();
+    }
+    final String entry = audEntry.trim();
+    if (entry.isEmpty()) {
+      return Optional.empty();
+    }
+
+    final int schemeSep = entry.indexOf("://");
+    if (schemeSep <= 0 || !"https".equalsIgnoreCase(entry.substring(0, schemeSep))) {
+      return Optional.empty();
+    }
+
+    final int pathStart = indexOfAuthorityEnd(entry, schemeSep + 3);
+    final String authorityPart = entry.substring(0, pathStart);
+    String rawPath = pathStart < entry.length() && entry.charAt(pathStart) == '/'
+        ? entry.substring(pathStart)
+        : "/";
+    final int queryOrFragment = indexOfFirst(rawPath, 0, '?', '#');
+    if (queryOrFragment >= 0) {
+      rawPath = rawPath.substring(0, queryOrFragment);
+    }
+
+    // authorityPart comes from entry.substring(...), which never returns null, so
+    // URISyntaxException is the only exception new URI(String) can throw here.
+    final URI uri;
+    try {
+      uri = new URI(authorityPart);
+    } catch (URISyntaxException e) {
+      return Optional.empty();
+    }
+    if (uri.getUserInfo() != null || uri.getHost() == null) {
+      return Optional.empty();
+    }
+    final String rawHost = uri.getHost();
+    if (rawHost.endsWith(".")) {
+      return Optional.empty();
+    }
+    final String host = rawHost.toLowerCase(Locale.ROOT);
+    final String[] labels = host.split("\\.", -1);
+    for (final String label : labels) {
+      if (label.isEmpty()) {
+        return Optional.empty();
+      }
+    }
+
+    final String serviceName = labels[0];
+    final String namespace;
+    if (labels.length == 1) {
+      namespace = null;
+    } else {
+      namespace = labels[1];
+      if (labels.length >= 3) {
+        if (!"svc".equals(labels[2])) {
+          return Optional.empty();
+        }
+        final String[] clusterDomainLabels = clusterDomain.toLowerCase(Locale.ROOT).split("\\.", -1);
+        final int remainderLength = labels.length - 3;
+        if (remainderLength > clusterDomainLabels.length) {
+          return Optional.empty();
+        }
+        for (int i = 0; i < remainderLength; i++) {
+          if (!labels[3 + i].equals(clusterDomainLabels[i])) {
+            return Optional.empty();
+          }
+        }
+      }
+    }
+
+    final Optional<String> tidied = normalizeAndTidy(rawPath);
+    if (tidied.isEmpty()) {
+      return Optional.empty();
+    }
+    final String resourcePathRaw = tidied.get();
+    final String resourcePathEncoded = PERCENT_ENCODED_OCTET.matcher(resourcePathRaw).find()
+        ? resourcePathRaw
+        : URIUtil.encodePath(resourcePathRaw);
+
+    return Optional.of(new AudienceResource(null, -1, namespace, serviceName, resourcePathRaw, resourcePathEncoded));
+  }
+}

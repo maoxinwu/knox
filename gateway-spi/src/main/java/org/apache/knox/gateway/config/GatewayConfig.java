@@ -21,6 +21,7 @@ import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 import java.security.KeyStore;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -72,6 +73,10 @@ public interface GatewayConfig {
   String SIGNING_KEYSTORE_PASSWORD_ALIAS = "gateway.signing.keystore.password.alias";
   String SIGNING_KEYSTORE_TYPE = "gateway.signing.keystore.type";
   String SIGNING_KEY_ALIAS = "gateway.signing.key.alias";
+  // Comma-separated list of additional signing-keystore aliases whose public keys are published on
+  // the JWKS endpoint and accepted (selected by 'kid') when verifying gateway-signed JWTs. Lets an
+  // operator retain a previous key across a manual key rotation so already-issued tokens still verify.
+  String SIGNING_KEY_ALIASES_ADDITIONAL = "gateway.signing.key.aliases.additional";
   String SIGNING_KEY_PASSPHRASE_ALIAS = "gateway.signing.key.passphrase.alias";
   String DEFAULT_SIGNING_KEYSTORE_PASSWORD_ALIAS = "signing.keystore.password";
   String DEFAULT_SIGNING_KEYSTORE_TYPE = KeyStore.getDefaultType();
@@ -151,12 +156,51 @@ public interface GatewayConfig {
   String LDAP_ROLES_LOOKUP_STRATEGY = "gateway.ldap.roles.lookup.strategy";
   String LDAP_ROLES_LOOKUP_REST_API_ENDPOINT = "gateway.ldap.roles.lookup.rest.api.endpoint";
   String LDAP_ROLES_LOOKUP_FILE_PATH = "gateway.ldap.roles.lookup.file.path";
+  String LDAP_ROLES_LIST_REST_API_ENDPOINT = "gateway.ldap.roles.list.rest.api.endpoint";
+  String LDAP_ROLES_GET_REST_API_ENDPOINT = "gateway.ldap.roles.get.rest.api.endpoint";
   String LDAP_SSL_ENABLED = "gateway.ldap.ssl.enabled";
   String LDAP_SSL_KEYSTORE_PATH = "gateway.ldap.ssl.keystore.path";
   String LDAP_SSL_KEYSTORE_PASSWORD_ALIAS = "gateway.ldap.ssl.keystore.password.alias";
   String LDAP_SSL_ENABLED_CIPHER_SUITES = "gateway.ldap.ssl.enabled.cipher.suites";
   String LDAP_MAX_SIZE_LIMIT = "gateway.ldap.max.size.limit";
   String LDAP_MAX_TIME_LIMIT = "gateway.ldap.max.time.limit";
+  String LDAP_DN_MAPPING_ENABLED = "gateway.ldap.dn.mapping.enabled";
+  String LDAP_BACKEND_PASSWORD_ALIAS_RETRY_ATTEMPTS = "gateway.ldap.backend.password.alias.retry.attempts";
+  String LDAP_BACKEND_PASSWORD_ALIAS_RETRY_INTERVAL_MS = "gateway.ldap.backend.password.alias.retry.interval.ms";
+
+  // TrustedOidcIssuerService gateway-level params and their default values
+  String TRUSTED_OIDC_ISSUER_PREFIX = "gateway.trusted.oidc.issuer.";
+  String TRUSTED_OIDC_ISSUER_MAX_TRUSTED_ISSUERS = TRUSTED_OIDC_ISSUER_PREFIX + "max.issuers";
+  int TRUSTED_OIDC_ISSUER_MAX_TRUSTED_ISSUERS_DEFAULT = 10_000;
+  // Upper bound (seconds) on how long a node may serve a registry snapshot before re-reading the DB (HA consistency)
+  String TRUSTED_OIDC_ISSUER_REGISTRY_CACHE_TTL_SECS = TRUSTED_OIDC_ISSUER_PREFIX + "registry.cache.ttl.secs";
+  int TRUSTED_OIDC_ISSUER_REGISTRY_CACHE_TTL_SECS_DEFAULT = 60;
+  String TRUSTED_OIDC_ISSUER_DISCOVERY_PREFIX = TRUSTED_OIDC_ISSUER_PREFIX + "discovery.";
+  String TRUSTED_OIDC_ISSUER_DISCOVERY_CACHE_TTL_SECS = TRUSTED_OIDC_ISSUER_DISCOVERY_PREFIX + "cache.ttl.secs";
+  int TRUSTED_OIDC_ISSUER_DISCOVERY_CACHE_TTL_SECS_DEFAULT = 600;
+  String TRUSTED_OIDC_ISSUER_DISCOVERY_CONNECT_TIMEOUT_MS = TRUSTED_OIDC_ISSUER_DISCOVERY_PREFIX + "connect.timeout.ms";
+  int TRUSTED_OIDC_ISSUER_DISCOVERY_CONNECT_TIMEOUT_MS_DEFAULT = 3000;
+  String TRUSTED_OIDC_ISSUER_DISCOVERY_READ_TIMEOUT_MS = TRUSTED_OIDC_ISSUER_DISCOVERY_PREFIX+ "read.timeout.ms";
+  int TRUSTED_OIDC_ISSUER_DISCOVERY_READ_TIMEOUT_MS_DEFAULT = 10000;
+  String TRUSTED_OIDC_ISSUER_CA_SECRET_MAX_AGE_SECS = TRUSTED_OIDC_ISSUER_PREFIX + "ca.secret.max.age.secs";
+  int TRUSTED_OIDC_ISSUER_CA_SECRET_MAX_AGE_SECS_DEFAULT = 1800;
+
+  // KnoxIDF delegation policy service configuration.
+  String DELEGATION_SERVICE_PREFIX = "gateway.delegation.service.";
+  String DELEGATION_SERVICE_TOKEN_TTL_SEC = DELEGATION_SERVICE_PREFIX + "token.ttl.sec";
+  int    DELEGATION_SERVICE_TOKEN_TTL_SEC_DEFAULT = 3600;
+  String DELEGATION_SERVICE_LIST_MAX_TOTAL = DELEGATION_SERVICE_PREFIX + "list.max.total";
+  int    DELEGATION_SERVICE_LIST_MAX_TOTAL_DEFAULT = 10_000;
+  String DELEGATION_SERVICE_LIST_MAX_PER_AUTHORITY = DELEGATION_SERVICE_PREFIX + "list.max.per.authority";
+  int    DELEGATION_SERVICE_LIST_MAX_PER_AUTHORITY_DEFAULT = 10_000;
+
+  // KnoxIDF federated-OP back-channel (token exchange) HTTP client timeouts. Without these an
+  // unresponsive external OP token endpoint pins the calling request thread indefinitely.
+  String KNOXIDF_FEDERATED_OP_PREFIX = "gateway.knoxidf.federated.op.";
+  String KNOXIDF_FEDERATED_OP_CONNECT_TIMEOUT_MS = KNOXIDF_FEDERATED_OP_PREFIX + "connect.timeout.ms";
+  int KNOXIDF_FEDERATED_OP_CONNECT_TIMEOUT_MS_DEFAULT = 3000;
+  String KNOXIDF_FEDERATED_OP_READ_TIMEOUT_MS = KNOXIDF_FEDERATED_OP_PREFIX + "read.timeout.ms";
+  int KNOXIDF_FEDERATED_OP_READ_TIMEOUT_MS_DEFAULT = 10000;
 
   /**
    * The location of the gateway configuration.
@@ -450,6 +494,21 @@ public interface GatewayConfig {
    * @return an alias name
    */
   String getSigningKeyPassphraseAlias();
+
+  /**
+   * Returns the ordered list of signing-keystore aliases whose public keys the gateway publishes on
+   * the JWKS endpoint and accepts (selected by {@code kid}) when verifying gateway-signed JWTs. The
+   * current signing key ({@link #getSigningKeyAlias()}) is always first; any additional
+   * verification-only keys (e.g. a previous key retained across a manual key rotation) follow.
+   * <p>
+   * Implementations that do not support additional keys return just the current signing key, so a
+   * single-key deployment behaves exactly as before.
+   *
+   * @return the current signing key alias followed by any additional verification key aliases
+   */
+  default List<String> getSigningKeyAliases() {
+    return getSigningKeyAlias() == null ? Collections.emptyList() : Collections.singletonList(getSigningKeyAlias());
+  }
 
 
   List<String> getGlobalRulesServices();
@@ -983,6 +1042,20 @@ public interface GatewayConfig {
 
   String getDatabaseSslTruststoreFileName();
 
+  /**
+   * Whether at-rest encryption is enabled for the embedded H2 database. Opt-in; defaults to
+   * {@code false}. When {@code true}, the encryption passphrase is resolved from the credential
+   * store alias named by {@link #getDatabaseH2EncryptionPassphraseAlias()} (never the master secret).
+   */
+  boolean isDatabaseH2EncryptionEnabled();
+
+  /**
+   * Name of the credential-store alias whose stored value is the passphrase used for at-rest
+   * encryption of the embedded H2 database. Consulted only when {@link #isDatabaseH2EncryptionEnabled()}
+   * is {@code true}. The operator provisions this alias; Knox never auto-generates it.
+   */
+  String getDatabaseH2EncryptionPassphraseAlias();
+
   int getJettyMaxFormContentSize();
 
   int getJettyMaxFormKeys();
@@ -1183,6 +1256,16 @@ public interface GatewayConfig {
   String getLdapRolesLookupRestApiEndpoint();
 
   /**
+   * @return the LDAP roles list REST API endpoint
+   */
+  String getLdapRolesListRestApiEndpoint();
+
+  /**
+   * @return the LDAP role get REST API endpoint
+   */
+  String getLdapRolesGetRestApiEndpoint();
+
+  /**
    * @return the LDAP roles lookup file path
    */
   String getLdapRolesLookupFilePath();
@@ -1224,9 +1307,52 @@ public interface GatewayConfig {
   int getLDAPMaxTimeLimit();
 
   /**
+   * @return true if DN mapping in the LDAP service is enabled
+   */
+  boolean getLDAPDnMappingEnabled();
+
+  /**
+   * @return the number of times an LDAP backend password alias reference that cannot be found in the
+   * gateway credential store is looked up again before it is left unresolved; 0 disables retries
+   */
+  int getLDAPBackendPasswordAliasRetryAttempts();
+
+  /**
+   * @return the delay in milliseconds between LDAP backend password alias lookup retries
+   */
+  int getLDAPBackendPasswordAliasRetryIntervalMs();
+
+  /**
    * @return set of all property names in the configuration
    */
   Set<String> getPropertyNames();
 
   boolean getGroupUIServicesOnHomepage();
+
+  int getTrustedOidcIssuerMaxTrustedIssuers();
+
+  int getTrustedOidcIssuerRegistryCacheTtlSecs();
+
+  int getTrustedOidcIssuerDiscoveryCacheTtlSecs();
+
+  int getTrustedOidcIssuerDiscoveryConnectTimeoutMs();
+
+  int getTrustedOidcIssuerDiscoveryReadTimeoutMs();
+
+  /**
+   * @return how long, in seconds, a CA bundle read from a Kubernetes Secret referenced by a trusted
+   *     OIDC issuer's {@code jwksCa} is used before it is re-read on the next access
+   */
+  int getTrustedOidcIssuerCaSecretMaxAgeSecs();
+
+  int getKnoxIDFFederatedOpConnectTimeoutMs();
+
+  int getKnoxIDFFederatedOpReadTimeoutMs();
+
+  int getDelegationServiceTokenTtlSec();
+
+  int getDelegationServiceListMaxTotal();
+
+  int getDelegationServiceListMaxPerAuthority();
+
 }

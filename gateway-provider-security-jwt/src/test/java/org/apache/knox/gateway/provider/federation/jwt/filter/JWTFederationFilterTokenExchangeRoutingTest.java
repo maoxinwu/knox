@@ -24,13 +24,13 @@ import org.easymock.EasyMock;
 import org.junit.Before;
 import org.junit.Test;
 
-import javax.servlet.FilterChain;
-import javax.servlet.ServletException;
-import javax.servlet.ServletRequest;
-import javax.servlet.ServletResponse;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletRequestWrapper;
-import javax.servlet.http.HttpServletResponse;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletResponse;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletRequestWrapper;
+import jakarta.servlet.http.HttpServletResponse;
 
 import java.io.IOException;
 
@@ -64,7 +64,7 @@ public class JWTFederationFilterTokenExchangeRoutingTest {
   @Test
   public void testTokenExchangeGrantRoutesToHandler() throws Exception {
     // grant_type in the body (unwrapped), no Authorization header
-    final HttpServletRequest request = wrapped(bodyRequest(TokenExchangeHandler.TOKEN_EXCHANGE, null));
+    final HttpServletRequest request = wrapped(bodyRequest(JWTFederationFilter.TOKEN_EXCHANGE, null));
 
     filter.doFilter(request, response, chain);
 

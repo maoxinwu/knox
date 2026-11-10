@@ -168,7 +168,8 @@ public abstract class DeploymentFactory {
     validateNoAppsWithDuplicateUrlsInTopology( topology );
   }
 
-  public static EnterpriseArchive createDeployment( GatewayConfig config, Topology topology ) {
+  public static EnterpriseArchive createDeployment( GatewayConfig config, Topology sourceTopology ) {
+    Topology topology = sourceTopology.shallowCopy();
     validateTopology( topology );
     loadStacksServiceContributors( config );
     Map<String,List<ProviderDeploymentContributor>> providers = selectContextProviders( topology );
@@ -376,6 +377,13 @@ public abstract class DeploymentFactory {
       GatewayConfig gatewayConfig) {
     WebAppDescriptor wad = context.getWebAppDescriptor();
     String topoName = context.getTopology().getName();
+
+    final boolean hasKnoxIdf = services!= null && services.entrySet().stream().anyMatch( e -> e.getKey().equalsIgnoreCase("KNOXIDF") );
+    if (hasKnoxIdf) {
+      wad.createServlet().servletName("auth-consent-redirect").servletClass("org.apache.knox.gateway.service.knoxidf.AuthConsentServlet");
+      wad.createServletMapping().servletName("auth-consent-redirect").urlPattern("/authConsent");
+    }
+
     boolean asyncSupported = gatewayConfig.isAsyncSupported() || gatewayConfig.isTopologyAsyncSupported(topoName);
     if( applications == null ) {
       String servletName = topoName + SERVLET_NAME_SUFFIX;

@@ -17,6 +17,8 @@
  */
 package org.apache.knox.gateway.service.knoxtoken;
 
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStoreException;
 import java.security.cert.Certificate;
@@ -29,10 +31,12 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.Enumeration;
 import java.util.Map;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
@@ -42,22 +46,22 @@ import java.util.TreeSet;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
-import javax.annotation.PostConstruct;
-import javax.inject.Singleton;
+import jakarta.annotation.PostConstruct;
+import jakarta.inject.Singleton;
 import javax.security.auth.Subject;
-import javax.servlet.ServletContext;
-import javax.servlet.ServletException;
-import javax.servlet.http.HttpServletRequest;
-import javax.ws.rs.Consumes;
-import javax.ws.rs.DELETE;
-import javax.ws.rs.GET;
-import javax.ws.rs.POST;
-import javax.ws.rs.PUT;
-import javax.ws.rs.Path;
-import javax.ws.rs.Produces;
-import javax.ws.rs.core.Context;
-import javax.ws.rs.core.Response;
-import javax.ws.rs.core.UriInfo;
+import jakarta.servlet.ServletContext;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 
 import com.google.gson.Gson;
 import com.nimbusds.jose.JWSAlgorithm;
@@ -67,10 +71,17 @@ import com.nimbusds.jose.util.ByteUtils;
 
 import org.apache.commons.codec.binary.Base64;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.knox.gateway.audit.api.Action;
+import org.apache.knox.gateway.audit.api.ActionOutcome;
+import org.apache.knox.gateway.audit.api.AuditServiceFactory;
+import org.apache.knox.gateway.audit.api.Auditor;
+import org.apache.knox.gateway.audit.api.ResourceType;
+import org.apache.knox.gateway.audit.log4j.audit.AuditConstants;
 import org.apache.knox.gateway.config.GatewayConfig;
 import org.apache.knox.gateway.context.ContextAttributes;
 import org.apache.knox.gateway.i18n.messages.MessagesFactory;
 import org.apache.knox.gateway.security.ActorChainPrincipal;
+import org.apache.knox.gateway.security.CommonTokenConstants;
 import org.apache.knox.gateway.security.GroupPrincipal;
 import org.apache.knox.gateway.security.SubjectUtils;
 import org.apache.knox.gateway.security.TokenIdPrincipal;
@@ -87,6 +98,7 @@ import org.apache.knox.gateway.services.security.token.JWTokenAuthority;
 import org.apache.knox.gateway.services.security.token.KnoxToken;
 import org.apache.knox.gateway.services.security.token.PersistentTokenStateService;
 import org.apache.knox.gateway.services.security.token.TokenMetadata;
+import org.apache.knox.gateway.services.security.token.TokenMetadataType;
 import org.apache.knox.gateway.services.security.token.TokenServiceException;
 import org.apache.knox.gateway.services.security.token.TokenStateService;
 import org.apache.knox.gateway.services.security.token.TokenUtils;
@@ -95,10 +107,11 @@ import org.apache.knox.gateway.services.security.token.impl.JWT;
 import org.apache.knox.gateway.services.security.token.impl.JWTToken;
 import org.apache.knox.gateway.services.security.token.impl.TokenMAC;
 import org.apache.knox.gateway.util.JsonUtils;
+import org.apache.knox.gateway.util.knoxidf.KnoxIDFUtils;
 import org.apache.knox.gateway.util.Tokens;
 
-import static javax.ws.rs.core.MediaType.APPLICATION_JSON;
-import static javax.ws.rs.core.MediaType.APPLICATION_XML;
+import static jakarta.ws.rs.core.MediaType.APPLICATION_JSON;
+import static jakarta.ws.rs.core.MediaType.APPLICATION_XML;
 
 /**
  * Some of the public REST API endpoints in this class (bound to
@@ -116,7 +129,7 @@ public class TokenResource {
   protected static final String TOKEN_TYPE = "token_type";
   protected static final String ACCESS_TOKEN = "access_token";
   protected static final String TOKEN_ID = "token_id";
-  static final String PASSCODE = "passcode";
+  public static final String PASSCODE = "passcode";
   protected static final String MANAGED_TOKEN = "managed";
   private static final String TARGET_URL = "target_url";
   private static final String ENDPOINT_PUBLIC_CERT = "endpoint_public_cert";
@@ -125,6 +138,8 @@ public class TokenResource {
   protected static final String TOKEN_TTL_PARAM = TOKEN_PARAM_PREFIX + "ttl";
   public static final String TOKEN_TYPE_PARAM = TOKEN_PARAM_PREFIX + "type";
   private static final String TOKEN_AUDIENCES_PARAM = TOKEN_PARAM_PREFIX + "audiences";
+  static final String RESOURCE_QUERY_PARAM = CommonTokenConstants.RESOURCE;
+  private static final String TOKEN_AUDIENCE_VALIDATOR_PARAM = TOKEN_PARAM_PREFIX + "audience.validator";
   public static final String TOKEN_INCLUDE_GROUPS_IN_JWT_ALLOWED = TOKEN_PARAM_PREFIX + "include.groups.allowed";
   private static final String TOKEN_TARGET_URL = TOKEN_PARAM_PREFIX + "target.url";
   static final String TOKEN_CLIENT_DATA = TOKEN_PARAM_PREFIX + "client.data";
@@ -145,9 +160,13 @@ public class TokenResource {
   private static final String LIFESPAN_INPUT_ENABLED_PARAM = TOKEN_PARAM_PREFIX + "lifespan.input.enabled";
   private static final String LIFESPAN_INPUT_ENABLED_TEXT = "lifespanInputEnabled";
   static final String KNOX_TOKEN_USER_LIMIT_PER_USER = TOKEN_PARAM_PREFIX + "limit.per.user";
+  static final String KNOX_TOKEN_USER_LIMIT_PER_USER_BY_TYPE_ENABLED = TOKEN_PARAM_PREFIX + "limit.per.user.by.type.enabled";
   static final String KNOX_TOKEN_USER_LIMIT_EXCEEDED_ACTION = TOKEN_PARAM_PREFIX + "user.limit.exceeded.action";
+  private static final String KNOX_TOKEN_HARDCODED_CLAIM_MAPPINGS = TOKEN_PARAM_PREFIX + "hardcoded.claim.mappings";
   private static final String METADATA_QUERY_PARAM_PREFIX = "md_";
   private static final String TOKEN_ENABLE_DELEGATED_AUTH = TOKEN_PARAM_PREFIX + "enable.delegated.auth";
+  static final String DELEGATION_MAX_ACTOR_CHAIN_DEPTH = "delegation.max.actor.chain.depth";
+  static final int DELEGATION_MAX_ACTOR_CHAIN_DEPTH_DEFAULT = 3;
   private static final long TOKEN_TTL_DEFAULT = 30000L;
   static final String TOKEN_API_PATH = "knoxtoken/api/v1";
   static final String RESOURCE_PATH = TOKEN_API_PATH + "/token";
@@ -167,10 +186,16 @@ public class TokenResource {
   public static final String KNOX_TOKEN_ISSUER = TOKEN_PARAM_PREFIX + "issuer";
   private static TokenServiceMessages log = MessagesFactory.get(TokenServiceMessages.class);
   private static final Gson GSON = new Gson();
+  // Non-final and package-private to allow test injection of a mock Auditor, matching the
+  // already-established pattern in TokenExchangeAuditing.auditor / DelegationPolicyResource.auditor.
+  static Auditor auditor = AuditServiceFactory.getAuditService()
+      .getAuditor(AuditConstants.DEFAULT_AUDITOR_NAME,
+          AuditConstants.KNOX_SERVICE_NAME, AuditConstants.KNOX_COMPONENT_NAME);
   protected long tokenTTL = TOKEN_TTL_DEFAULT;
   private String tokenType;
   private String tokenTTLAsText;
   private List<String> targetAudiences = new ArrayList<>();
+  private AudienceValidator audienceValidator;
   private String tokenTargetUrl;
   private Map<String, Object> tokenClientDataMap;
   private List<String> allowedDNs = new ArrayList<>();
@@ -188,9 +213,12 @@ public class TokenResource {
   private Optional<Long> maxTokenLifetime = Optional.empty();
 
   private int tokenLimitPerUser;
+  private boolean enableTokenLimitPerUserByType;
+  private Map<String, Object> hardCodedClaimMappings;
   private boolean includeGroupsInTokenAllowed;
   private String tokenIssuer;
   private boolean enableDelegatedAuth;
+  private int maxActorChainDepth;
 
   enum UserLimitExceededAction {REMOVE_OLDEST, RETURN_ERROR};
 
@@ -215,7 +243,10 @@ public class TokenResource {
     ALREADY_DISABLED(60),
     ALREADY_ENABLED(70),
     DISABLED_KNOXSSO_COOKIE(80),
-    TOKEN_EXPIRED(90);
+    TOKEN_EXPIRED(90),
+    INVALID_AUDIENCE(100),
+    INVALID_RESOURCE(110),
+    ACTOR_CHAIN_DEPTH_EXCEEDED(120);
 
     private final int code;
 
@@ -242,6 +273,18 @@ public class TokenResource {
       for (String aud : auds) {
         targetAudiences.add(aud.trim());
       }
+    }
+
+    try {
+      audienceValidator = AudienceValidator.forName(context.getInitParameter(TOKEN_AUDIENCE_VALIDATOR_PARAM));
+    } catch (IllegalArgumentException e) {
+      throw new ServiceLifecycleException(e.getMessage(), e);
+    }
+
+    if (audienceValidator.requiresConfiguredAudiences() && targetAudiences.isEmpty()) {
+      throw new ServiceLifecycleException("The '" + audienceValidator.name()
+          + "' audience validator requires audiences to be configured in '" + TOKEN_AUDIENCES_PARAM
+          + "', but none are set. Configure the allowed audiences or select a different audience validator.");
     }
 
     String clientCert = context.getInitParameter(TOKEN_CLIENT_CERT_REQUIRED);
@@ -275,6 +318,7 @@ public class TokenResource {
 
     String enableDelegatedAuthParam = context.getInitParameter(TOKEN_ENABLE_DELEGATED_AUTH);
     enableDelegatedAuth = enableDelegatedAuthParam != null && Boolean.parseBoolean(enableDelegatedAuthParam);
+    setDelegationMaxActorChainDepth();
 
     this.tokenIssuer = StringUtils.isBlank(context.getInitParameter(KNOX_TOKEN_ISSUER))
             ? JWTokenAttributes.DEFAULT_ISSUER
@@ -323,6 +367,14 @@ public class TokenResource {
         }
       }
 
+      final String enableTokenLimitPerUserByTypeParam = context.getInitParameter(KNOX_TOKEN_USER_LIMIT_PER_USER_BY_TYPE_ENABLED);
+      enableTokenLimitPerUserByType = StringUtils.isBlank(enableTokenLimitPerUserByTypeParam) || Boolean.parseBoolean(enableTokenLimitPerUserByTypeParam);
+      if (enableTokenLimitPerUserByType) {
+        log.generalInfoMessage("Knox Token limit per user is enforced per token type; counted token types = " + getTokenTypesCountedTowardsLimit());
+      } else {
+        log.generalInfoMessage("Knox Token limit per user is enforced across all token types");
+      }
+
       final String userLimitExceededActionParam = context.getInitParameter(KNOX_TOKEN_USER_LIMIT_EXCEEDED_ACTION);
       if (userLimitExceededActionParam != null) {
         userLimitExceededAction = UserLimitExceededAction.valueOf(userLimitExceededActionParam);
@@ -365,7 +417,57 @@ public class TokenResource {
               .filter(s -> !s.isEmpty())
               .collect(Collectors.toSet());
     }
+
+    parseHardcodedClaimMappings(context.getInitParameter(KNOX_TOKEN_HARDCODED_CLAIM_MAPPINGS));
     setTokenStateServiceStatusMap();
+  }
+
+  private void setDelegationMaxActorChainDepth() {
+    maxActorChainDepth = DELEGATION_MAX_ACTOR_CHAIN_DEPTH_DEFAULT;
+    final String maxActorChainDepthParam = context.getInitParameter(DELEGATION_MAX_ACTOR_CHAIN_DEPTH);
+    if (StringUtils.isNotBlank(maxActorChainDepthParam)) {
+      try {
+        final int configuredDepth = Integer.parseInt(maxActorChainDepthParam.trim());
+        if (configuredDepth < 1) {
+          logMaxActorChainDepthConfigurationError(maxActorChainDepthParam, new NumberFormatException("value must be a positive integer"));
+        } else {
+          maxActorChainDepth = configuredDepth;
+        }
+      } catch (final NumberFormatException nfe) {
+        logMaxActorChainDepthConfigurationError(maxActorChainDepthParam, nfe);
+      }
+    }
+  }
+
+  private void logMaxActorChainDepthConfigurationError(final String maxActorChainDepthParam, final NumberFormatException nfe) {
+    log.invalidConfigValue(getTopologyName(), DELEGATION_MAX_ACTOR_CHAIN_DEPTH, maxActorChainDepthParam, nfe);
+    log.generalInfoMessage("Using the default maximum actor chain depth of " + DELEGATION_MAX_ACTOR_CHAIN_DEPTH_DEFAULT + ".");
+  }
+
+  private void parseHardcodedClaimMappings(String raw) {
+    hardCodedClaimMappings = new HashMap<>();
+
+    if (raw != null && !raw.isBlank()) {
+      Arrays.stream(raw.split(";"))
+              .map(String::trim)
+              .filter(s -> !s.isEmpty())
+              .map(entry -> entry.split("=", 2))
+              .filter(kv -> kv.length == 2)
+              .forEach(kv -> {
+                String key = kv[0].trim();
+                String value = kv[1].trim();
+
+                Object mappedValue =
+                        value.contains(",")
+                                ? Arrays.stream(value.split(","))
+                                .map(String::trim)
+                                .filter(v -> !v.isEmpty())
+                                .toList()
+                                : value;
+
+                hardCodedClaimMappings.put(key, mappedValue);
+              });
+    }
   }
 
   private String getTokenTTLAsText() {
@@ -430,8 +532,8 @@ public class TokenResource {
         }
       }
     } else {
-      //if there is no custom configuration in the topology, then we allow DerbyDB and custom DB back-ends for the tokengen application
-      if ("DerbyDBTokenStateService".equals(actualTokenServiceName) || "JDBCTokenStateService".equals(actualTokenServiceName)) {
+      //if there is no custom configuration in the topology, then we allow the embedded H2 and custom DB back-ends for the tokengen application
+      if ("H2DBTokenStateService".equals(actualTokenServiceName) || "JDBCTokenStateService".equals(actualTokenServiceName)) {
         tokenStateServiceStatusMap.put(TSS_ALLOWED_BACKEND_FOR_TOKENGEN, "true");
       }
     }
@@ -507,6 +609,14 @@ public class TokenResource {
       final String createdBy = uriInfo.getQueryParameters().getFirst("createdBy");
       final String userNameOrCreatedBy = uriInfo.getQueryParameters().getFirst("userNameOrCreatedBy");
       final boolean allTokens = Boolean.parseBoolean(uriInfo.getQueryParameters().getFirst("allTokens"));
+
+      final String caller = SubjectUtils.getCurrentEffectivePrincipalName();
+      if (!isAuthorizedToSeeTokens(caller, userName, createdBy, userNameOrCreatedBy, allTokens)) {
+        log.unauthorizedGetUserTokensRequest(getTopologyName(), caller);
+        return Response.status(Response.Status.FORBIDDEN)
+            .entity("{\n  \"error\": \"Caller (" + caller + ") is not authorized to see other users' tokens.\"\n}\n").build();
+      }
+
       final Collection<KnoxToken> userTokens;
       if (allTokens) {
         userTokens = tokenStateService.getAllTokens();
@@ -538,6 +648,29 @@ public class TokenResource {
       }
       return Response.status(Response.Status.OK).entity(JsonUtils.renderAsJsonString(Collections.singletonMap("tokens", tokens))).build();
     }
+  }
+
+  private boolean isAuthorizedToSeeTokens(String caller, String userName, String createdBy, String userNameOrCreatedBy, boolean allTokens) {
+    if (StringUtils.isBlank(caller)) {
+      return false;
+    }
+    final GatewayConfig config = (GatewayConfig) context.getAttribute(GatewayConfig.GATEWAY_CONFIG_ATTRIBUTE);
+    if (config != null && config.canSeeAllTokens(caller)) {
+      return true;
+    }
+    if (allTokens) {
+      return false;
+    }
+    // an ordinary caller must scope the query to their own tokens
+    final boolean hasIdentifier = userName != null || createdBy != null || userNameOrCreatedBy != null;
+    return hasIdentifier
+        && requestedIsCallerIfPresent(caller, userName)
+        && requestedIsCallerIfPresent(caller, createdBy)
+        && requestedIsCallerIfPresent(caller, userNameOrCreatedBy);
+  }
+
+  private static boolean requestedIsCallerIfPresent(String caller, String requested) {
+    return requested == null || caller.equals(requested);
   }
 
   @GET
@@ -584,7 +717,7 @@ public class TokenResource {
     } else {
       final String renewer = SubjectUtils.getCurrentEffectivePrincipalName();
 
-      if (tokenRenewalOrRevocationAuthorized(renewer)) {
+      if (tokenStateChangeAuthorized(renewer)) {
         try {
           JWTToken jwt = new JWTToken(token);
           if (tokenStateService.isExpired(jwt)) {
@@ -624,7 +757,7 @@ public class TokenResource {
     return resp;
   }
 
-  private boolean tokenRenewalOrRevocationAuthorized(final String principalName) {
+  private boolean tokenStateChangeAuthorized(final String principalName) {
     final boolean userAllowed = allowedRenewers.contains(principalName);
     final boolean groupAllowed = SubjectUtils.getCurrentGroupPrincipals().stream()
             .map(GroupPrincipal::getName)
@@ -670,12 +803,12 @@ public class TokenResource {
     } else {
       try {
         final String revoker = SubjectUtils.getCurrentEffectivePrincipalName();
-        final String tokenId = getTokenId(token);
+        final String tokenId = TokenUtils.getTokenId(token);
         if (isKnoxSsoCookie(tokenId)) {
           errorStatus = Response.Status.FORBIDDEN;
           error = "SSO cookie (" + Tokens.getTokenIDDisplayText(tokenId) + ") cannot not be revoked.";
           errorCode = ErrorCode.UNAUTHORIZED;
-        } else if (triesToRevokeOwnToken(tokenId, revoker) || tokenRenewalOrRevocationAuthorized(revoker)) {
+        } else if (triesToChangeOwnToken(tokenId, revoker) || tokenStateChangeAuthorized(revoker)) {
           tokenStateService.revokeToken(tokenId);
           log.revokedToken(getTopologyName(),
                   Tokens.getTokenDisplayText(token),
@@ -715,27 +848,11 @@ public class TokenResource {
     return metadata == null ? false : metadata.isKnoxSsoCookie();
   }
 
-  private boolean triesToRevokeOwnToken(String tokenId, String revoker) throws UnknownTokenException {
+  private boolean triesToChangeOwnToken(String tokenId, String revoker) throws UnknownTokenException {
     final TokenMetadata metadata = tokenStateService.getTokenMetadata(tokenId);
     final String tokenUserName = metadata == null ? "" : metadata.getUserName();
     final String tokenCreatedBy = metadata == null ? "" : metadata.getCreatedBy();
     return StringUtils.isNotBlank(revoker) && (revoker.equals(tokenUserName) || revoker.equals(tokenCreatedBy));
-  }
-
-  /*
-   * If the supplied 'token' conforms the UUID string representation, we consider
-   * that as the token ID; otherwise we expect that 'token' is the entire JWT and
-   * we get the token ID from it
-   */
-  private String getTokenId(String token) throws ParseException {
-    try {
-      UUID.fromString(token);
-      return token;
-    } catch (IllegalArgumentException e) {
-      //NOP: the supplied token is not a UUID, we expect the entire JWT
-    }
-    final JWTToken jwt = new JWTToken(token);
-    return TokenUtils.getTokenId(jwt);
   }
 
   @PUT
@@ -785,13 +902,19 @@ public class TokenResource {
   private Response setTokenEnabledFlag(String tokenId, boolean enable, boolean batch) {
     String error = "";
     ErrorCode errorCode = ErrorCode.UNKNOWN;
+    Response.Status responseStatus = Response.Status.BAD_REQUEST;
     if (tokenStateService == null) {
       error = "Unable to " + (enable ? "enable" : "disable") + " tokens because token management is not configured";
       errorCode = ErrorCode.CONFIGURATION_ERROR;
     } else {
       try {
         final TokenMetadata tokenMetadata = tokenStateService.getTokenMetadata(tokenId);
-        if (!batch && enable && tokenMetadata.isEnabled()) {
+        final String caller = SubjectUtils.getCurrentEffectivePrincipalName();
+        if (!(triesToChangeOwnToken(tokenId, caller) || tokenStateChangeAuthorized(caller))) {
+          responseStatus = Response.Status.FORBIDDEN;
+          error = "Caller (" + caller + ") not authorized to " + (enable ? "enable" : "disable") + " tokens.";
+          errorCode = ErrorCode.UNAUTHORIZED;
+        } else if (!batch && enable && tokenMetadata.isEnabled()) {
           error = "Token is already enabled";
           errorCode = ErrorCode.ALREADY_ENABLED;
         } else if (!batch && !enable && !tokenMetadata.isEnabled()) {
@@ -811,16 +934,17 @@ public class TokenResource {
     }
 
     if (error.isEmpty()) {
+      responseStatus = Response.Status.OK;
       log.setEnabledFlag(getTopologyName(), enable, Tokens.getTokenIDDisplayText(tokenId));
-      return Response.status(Response.Status.OK).entity("{\n  \"setEnabledFlag\": \"true\",\n  \"isEnabled\": \"" + enable + "\"\n}\n").build();
+      return Response.status(responseStatus).entity("{\n  \"setEnabledFlag\": \"true\",\n  \"isEnabled\": \"" + enable + "\"\n}\n").build();
     } else {
       log.badSetEnabledFlagRequest(getTopologyName(), Tokens.getTokenIDDisplayText(tokenId), error);
-      return Response.status(Response.Status.BAD_REQUEST).entity("{\n  \"setEnabledFlag\": \"false\",\n  \"error\": \"" + error + "\",\n  \"code\": " + errorCode.toInt() + "\n}\n").build();
+      return Response.status(responseStatus).entity("{\n  \"setEnabledFlag\": \"false\",\n  \"error\": \"" + error + "\",\n  \"code\": " + errorCode.toInt() + "\n}\n").build();
     }
   }
 
   private X509Certificate extractCertificate(HttpServletRequest req) {
-    X509Certificate[] certs = (X509Certificate[]) req.getAttribute("javax.servlet.request.X509Certificate");
+    X509Certificate[] certs = (X509Certificate[]) req.getAttribute("jakarta.servlet.request.X509Certificate");
     if (null != certs && certs.length > 0) {
       return certs[0];
     }
@@ -845,21 +969,38 @@ public class TokenResource {
 
   protected TokenResponseContext getTokenResponse(UserContext context) {
     TokenResponseContext response = null;
+    long issueTime = System.currentTimeMillis();
     long expires = getExpiry();
     setupPublicCertPEM();
     String jku = getJku();
+
+    final List<String> audiences;
+    try {
+      audiences = audienceValidator.validateAndResolve(new AudienceValidationContext(parseRequestedResources(), targetAudiences));
+    } catch (RequestedAudienceValidationException e) {
+      log.rejectedAudienceRequest(e.getMessage());
+      return new TokenResponseContext(null,
+          errorResponseBody(e.getMessage(), e.getErrorCode()),
+          Response.status(Response.Status.BAD_REQUEST));
+    }
+
     try
     {
-      JWT token = getJWT(context.userName, expires, jku);
+      JWT token = getJWT(context, issueTime, expires, jku, audiences);
       if (token != null) {
         ResponseMap result = buildResponseMap(token, expires);
         String jsonResponse = JsonUtils.renderAsJsonString(result.map);
-        persistTokenDetails(result, expires, context.userName, context.createdBy);
+        persistTokenDetails(result, issueTime, expires, context.userName, context.createdBy);
 
         response = new TokenResponseContext(result, jsonResponse, Response.ok());
       } else {
         response = new TokenResponseContext(null, null, Response.serverError());
       }
+    } catch (ActorChainDepthExceededException e) {
+      log.rejectedTokenExchange(e.getMessage());
+      final Response.Status status = Response.Status.BAD_REQUEST;
+      final Response error = KnoxIDFUtils.error("invalid_request", e.getMessage(), status);
+      return new TokenResponseContext(null, (String) error.getEntity(), Response.status(status));
     } catch (TokenServiceException e) {
       log.unableToIssueToken(e);
       response = new TokenResponseContext(null
@@ -941,10 +1082,16 @@ public class TokenResource {
   protected static class UserContext {
     public final String userName;
     public final String createdBy;
+    private final Map<String, Object> userParams;
 
     public UserContext(String userName, String createdBy) {
+      this(userName, createdBy, Collections.emptyMap());
+    }
+
+    public UserContext(String userName, String createdBy, Map<String, Object> userParams) {
       this.userName = userName;
       this.createdBy = createdBy;
+      this.userParams = userParams;
     }
   }
 
@@ -955,7 +1102,7 @@ public class TokenResource {
         final Collection<KnoxToken> allUserTokens = tokenStateService.getTokens(userName);
         final Collection<KnoxToken> userTokens = new LinkedList<>();
         allUserTokens.stream().forEach(token -> {
-          if(!token.getMetadata().isKnoxSsoCookie()) {
+          if (isCountedTowardsTokenLimit(token.getMetadata())) {
             userTokens.add(token);
           }
         });
@@ -977,6 +1124,23 @@ public class TokenResource {
       }
     }
     return response;
+  }
+
+  /**
+   * Returns the token types counted towards the per-user token limit of this resource when
+   * {@value #KNOX_TOKEN_USER_LIMIT_PER_USER_BY_TYPE_ENABLED} is {@code true} (the default).
+   * Unless overridden, regular JWTs, as well as KnoxIDF authorization codes and refresh tokens are counted.
+   */
+  protected Set<TokenMetadataType> getTokenTypesCountedTowardsLimit() {
+    return EnumSet.of(TokenMetadataType.JWT, TokenMetadataType.AUTH_CODE, TokenMetadataType.REFRESH_TOKEN);
+  }
+
+  private boolean isCountedTowardsTokenLimit(TokenMetadata metadata) {
+    final TokenMetadataType tokenType = metadata.getTokenType();
+    if (TokenMetadataType.KNOXSSO_COOKIE == tokenType) {
+      return false; // KnoxSSO cookies never count towards the limit
+    }
+    return !enableTokenLimitPerUserByType || getTokenTypesCountedTowardsLimit().contains(tokenType);
   }
 
   protected void setupPublicCertPEM() {
@@ -1016,13 +1180,10 @@ public class TokenResource {
     return response;
   }
 
-  protected void persistTokenDetails(ResponseMap result, long expires, String userName, String createdBy) {
+  protected void persistTokenDetails(ResponseMap result, long issueTime, long expires, String userName, String createdBy) {
     // Optional token store service persistence
     if (tokenStateService != null) {
-      final long issueTime = System.currentTimeMillis();
-      tokenStateService.addToken(result.tokenId,
-                                 issueTime,
-              expires,
+      tokenStateService.addToken(result.tokenId, issueTime, expires,
                                  maxTokenLifetime.orElse(tokenStateService.getDefaultMaxLifetimeDuration()));
       final String comment = request.getParameter(COMMENT);
       final TokenMetadata tokenMetadata = new TokenMetadata(userName, StringUtils.isBlank(comment) ? null : comment);
@@ -1036,7 +1197,7 @@ public class TokenResource {
     }
   }
 
-  protected ResponseMap buildResponseMap(JWT token, long expires) {
+  protected ResponseMap buildResponseMap(JWT token, long expires) throws TokenServiceException {
     String accessToken = token.toString();
     String tokenId = TokenUtils.getTokenId(token);
     final boolean managedToken = tokenStateService != null;
@@ -1080,7 +1241,75 @@ public class TokenResource {
     }
   }
 
-  protected JWT getJWT(String userName, long expires, String jku) throws TokenServiceException {
+  private List<String> parseRequestedResources() throws RequestedAudienceValidationException {
+    // An upstream authentication/federation component may have already resolved and validated the
+    // requested audiences for this request and stashed them as a request attribute. When present,
+    // those pre-resolved values take precedence over the resource query parameter.
+    @SuppressWarnings("unchecked")
+    final List<String> requestedAudiences =
+        (List<String>) request.getAttribute(CommonTokenConstants.REQUESTED_AUDIENCES_REQUEST_ATTR);
+    if (requestedAudiences != null) {
+      return requestedAudiences;
+    }
+    final Map<String, String[]> parameterMap = request.getParameterMap();
+    final String[] rawValues = parameterMap == null ? null : parameterMap.get(RESOURCE_QUERY_PARAM);
+    final List<String> requested = new ArrayList<>();
+    if (rawValues != null) {
+      for (String rawValue : rawValues) {
+        for (String value : rawValue.split(",")) {
+          requested.add(validateResourceUri(value.trim()));
+        }
+      }
+    }
+    return requested;
+  }
+
+  /**
+   * Validates that a requested {@code resource} value is an absolute URI without a fragment, as
+   * required by RFC 8707 (Resource Indicators for OAuth 2.0) section 2 and RFC 3986 section 4.3.
+   * A query component is permitted; a fragment component is not. Returns the value unchanged when
+   * it is valid.
+   */
+  private String validateResourceUri(String value) throws RequestedAudienceValidationException {
+    final URI uri;
+    try {
+      uri = new URI(value);
+    } catch (URISyntaxException e) {
+      throw new RequestedAudienceValidationException(
+          "The requested resource '" + value + "' is not a valid URI.", ErrorCode.INVALID_RESOURCE);
+    }
+    if (!uri.isAbsolute() || uri.getFragment() != null) {
+      throw new RequestedAudienceValidationException(
+          "The requested resource '" + value + "' must be an absolute URI without a fragment.",
+          ErrorCode.INVALID_RESOURCE);
+    }
+    return value;
+  }
+
+  /**
+   * Renders a token-issuance error body as {@code {"error": ..., "code": ...}}. The {@code error}
+   * message may embed a caller-supplied value (e.g. an invalid {@code resource} indicator), so it is
+   * serialized through {@link JsonUtils} to escape it rather than being concatenated verbatim, which
+   * would allow the value to break out of the JSON string.
+   */
+  private static String errorResponseBody(String error, ErrorCode code) {
+    final Map<String, Object> body = new LinkedHashMap<>();
+    body.put("error", error);
+    body.put("code", code.toInt());
+    return JsonUtils.renderAsJsonString(body);
+  }
+
+  /**
+   * Hook for a subclass to supply the token's {@code knox.id}/{@code token_id}. Defaults to null
+   * (generate a UUID); {@link ClientCredentialsResource} overrides it to honor a user-supplied
+   * {@code clientId}.
+   */
+  protected String getRequestedTokenId() {
+    return null;
+  }
+
+  private JWT getJWT(UserContext userContext, long issueTime, long expires, String jku, List<String> audiences)
+      throws TokenServiceException, ActorChainDepthExceededException {
     JWTokenAttributes jwtAttributes;
     JWT token;
     JWTokenAuthority ts = getGatewayServices().getService(ServiceType.TOKEN_SERVICE);
@@ -1088,14 +1317,16 @@ public class TokenResource {
     final JWTokenAttributesBuilder jwtAttributesBuilder = new JWTokenAttributesBuilder();
     jwtAttributesBuilder
         .setIssuer(tokenIssuer)
-        .setUserName(userName)
+        .setUserName(userContext.userName)
         .setAlgorithm(signatureAlgorithm)
+        .setIssueTime(issueTime)
         .setExpires(expires)
         .setManaged(managedToken)
         .setJku(jku)
-        .setType(tokenType);
-    if (!targetAudiences.isEmpty()) {
-      jwtAttributesBuilder.setAudiences(targetAudiences);
+        .setType(tokenType)
+        .setTokenId(getRequestedTokenId());
+    if (audiences != null && !audiences.isEmpty()) {
+      jwtAttributesBuilder.setAudiences(audiences);
     }
     if (shouldIncludeGroups()) {
       jwtAttributesBuilder.setGroups(groups());
@@ -1112,12 +1343,49 @@ public class TokenResource {
       handleDelegatedAuthentication(subject, jwtAttributesBuilder);
     }
 
+    // This resource is a @Singleton, so hardCodedClaimMappings is shared across all requests and
+    // must never be mutated per-request. Merge the topology-configured mappings with this request's
+    // user params into a fresh map; otherwise one user's params would leak into other users' tokens.
+    final Map<String, Object> customAttributes = new HashMap<>(hardCodedClaimMappings);
+    if (userContext.userParams != null) {
+      customAttributes.putAll(userContext.userParams);
+    }
+
+    if (!customAttributes.isEmpty()) {
+      jwtAttributesBuilder.setCustomAttributes(customAttributes);
+    }
+
     jwtAttributes = jwtAttributesBuilder.build();
     token = ts.issueToken(jwtAttributes);
+    auditTokenExchangeMint(token, expires, userContext.userName);
     return token;
   }
 
-  private void handleDelegatedAuthentication(Subject subject, JWTokenAttributesBuilder jwtAttributesBuilder) {
+  /**
+   * Emit a mint-time TOKEN_EXCHANGE audit for an RFC 8693 exchange-originated mint, carrying the
+   * fields only known after minting: the token id (jti), the token's expiry, and the issued subject.
+   * The request is exchange-originated when the token-exchange path (JWTFederationFilter) marked it
+   * via {@link CommonTokenConstants#TOKEN_EXCHANGE_REQUEST_ATTR}; ordinary (non-exchange) token
+   * issuance carries no such marker and is deliberately not audited here. This mint record shares the
+   * request's audit correlation id with the pre-mint decision record emitted by the exchange handler,
+   * tying the two together.
+   *
+   * @param token         the freshly minted token
+   * @param expires       the token's expiry (epoch millis), as resolved for this mint
+   * @param issuedSubject the effective (possibly impersonated) subject the token was issued for
+   */
+  private void auditTokenExchangeMint(JWT token, long expires, String issuedSubject) {
+    if (!Boolean.TRUE.equals(request.getAttribute(CommonTokenConstants.TOKEN_EXCHANGE_REQUEST_ATTR))) {
+      return;
+    }
+    final String jti = TokenUtils.getTokenId(token);
+    auditor.audit(Action.TOKEN_EXCHANGE, issuedSubject, ResourceType.PRINCIPAL, ActionOutcome.SUCCESS,
+        "event_type=token_exchange_minted issued_token_jti=" + jti
+            + " issued_token_expiry=" + expires + " issued_subject=" + issuedSubject);
+  }
+
+  private void handleDelegatedAuthentication(Subject subject, JWTokenAttributesBuilder jwtAttributesBuilder)
+      throws ActorChainDepthExceededException {
     if (enableDelegatedAuth) {
       // First check if there's an existing actor chain from a previous token exchange
       Set<ActorChainPrincipal> actorChainPrincipals = subject.getPrincipals(ActorChainPrincipal.class);
@@ -1134,6 +1402,15 @@ public class TokenResource {
         if (primaryPrincipalName != null && impersonatedPrincipalName != null && !primaryPrincipalName.equals(impersonatedPrincipalName)) {
           // Build the new actor chain by adding the current actor (primary principal) to the existing chain
           List<Map<String, Object>> newActorChain = TokenUtils.addActorToChain(existingChain, primaryPrincipalName);
+          // Last chance before minting: reject the exchange if adding this actor would push the 'act'
+          // chain past the configured maximum depth. TokenUtils.addActorToChain / buildNestedActClaim
+          // are otherwise unbounded, so a chain could grow without limit across successive exchanges.
+          if (newActorChain.size() > maxActorChainDepth) {
+            log.actorChainDepthExceeded(newActorChain.size(), maxActorChainDepth);
+            throw new ActorChainDepthExceededException("The resulting actor chain depth (" + newActorChain.size()
+                    + ") would exceed the configured maximum of " + maxActorChainDepth + ".",
+                ErrorCode.ACTOR_CHAIN_DEPTH_EXCEEDED);
+          }
           jwtAttributesBuilder.setActorChain(newActorChain);
           log.addingActorClaimToToken(primaryPrincipalName, impersonatedPrincipalName);
         }
@@ -1187,6 +1464,19 @@ public class TokenResource {
   }
 
   protected long getExpiry() {
+    // An upstream component (the RFC 8693 token-exchange path) may have resolved an authoritative TTL
+    // from trusted, operator-configured delegation policy. When present it is the expiry basis
+    // directly: it deliberately bypasses the topology knox.token.ttl upper bound and the client-supplied
+    // lifespan clamp below, since the policy value is server-side state (a peer of the topology config),
+    // not untrusted client input, and its purpose is longer-lived tokens for headless/batch delegations.
+    // The value is not unbounded: it was constrained at policy-authoring time to the delegation TTL
+    // bounds [knox.delegation.min.token.ttl.sec, knox.delegation.max.token.ttl.sec], which default to
+    // 60 sec (1 minute) and 86400 sec (24 hours) respectively (see DelegationPolicyResource).
+    final Object requestedTtlSec = request.getAttribute(CommonTokenConstants.REQUESTED_TTL_REQUEST_ATTR);
+    if (requestedTtlSec instanceof Integer && (Integer) requestedTtlSec > 0) {
+      return System.currentTimeMillis() + ((Integer) requestedTtlSec) * 1000L;
+    }
+
     long expiry = 0L;
     long millis = tokenTTL;
 

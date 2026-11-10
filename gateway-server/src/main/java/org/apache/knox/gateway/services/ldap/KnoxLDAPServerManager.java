@@ -37,8 +37,11 @@ import org.apache.directory.server.core.DefaultDirectoryService;
 import org.apache.directory.server.core.api.DirectoryService;
 import org.apache.directory.server.core.api.DnFactory;
 import org.apache.directory.server.core.api.InstanceLayout;
+import org.apache.directory.server.core.api.InterceptorEnum;
 import org.apache.directory.server.core.api.interceptor.Interceptor;
 import org.apache.directory.server.core.api.schema.SchemaPartition;
+import org.apache.directory.server.core.authn.AuthenticationInterceptor;
+import org.apache.directory.server.core.authn.Authenticator;
 import org.apache.directory.server.core.partition.impl.btree.jdbm.JdbmPartition;
 import org.apache.directory.server.core.partition.ldif.LdifPartition;
 import org.apache.directory.server.ldap.LdapServer;
@@ -46,16 +49,20 @@ import org.apache.directory.server.protocol.shared.transport.TcpTransport;
 import org.apache.knox.gateway.config.GatewayConfig;
 import org.apache.knox.gateway.i18n.messages.MessagesFactory;
 import org.apache.knox.gateway.services.GatewayServices;
+import org.apache.knox.gateway.services.ldap.authn.InMemoryBindAuthenticator;
 import org.apache.knox.gateway.services.ldap.control.RolesLookupBypassControlFactory;
 import org.apache.knox.gateway.services.ldap.interceptor.InterceptorFactory;
 import org.apache.knox.gateway.services.ldap.interceptor.LDAPRolesLookupInterceptor;
+import org.apache.knox.gateway.services.ldap.interceptor.UserSearchInterceptor;
 import org.apache.knox.gateway.services.security.AliasService;
+import org.apache.knox.gateway.services.security.AliasServiceException;
 
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -67,6 +74,7 @@ import java.util.stream.IntStream;
 public class KnoxLDAPServerManager {
     private static final LdapMessages LOG = MessagesFactory.get(LdapMessages.class);
     private static final String LDAP_BIND_PASSWORD_ALIAS = "gateway_ldap_bind_password";
+    private static final List<String> BACKEND_PASSWORD_KEYS = List.of("bindPassword", "systemPassword", "trustStorePassword");
     private final AliasService aliasService;
     private final GatewayServices gatewayServices;
 
@@ -81,6 +89,7 @@ public class KnoxLDAPServerManager {
     private int port;
     private String baseDn;
     private String bindUser;
+    private boolean dnMappingEnabled;
     // Secure (LDAPS) transport configuration
     private boolean sslEnabled;
     private String sslKeystorePath;
@@ -90,6 +99,9 @@ public class KnoxLDAPServerManager {
     private Set<String> baseDns;
     private int maxSizeLimit;
     private int maxTimeLimit;
+    private int passwordAliasRetryAttempts;
+    private int passwordAliasRetryIntervalMs;
+    private boolean passwordAliasRetryEnabled = true;
 
     KnoxLDAPServerManager(AliasService aliasService) {
         this(aliasService, null);
@@ -98,6 +110,16 @@ public class KnoxLDAPServerManager {
     KnoxLDAPServerManager(AliasService aliasService, GatewayServices gatewayServices) {
         this.aliasService = aliasService;
         this.gatewayServices = gatewayServices;
+    }
+
+    /**
+     * Enables or disables the backend password alias retry configured in gateway-site.xml. When disabled,
+     * a missing alias is reported right away regardless of the configured retry attempts.
+     *
+     * @param passwordAliasRetryEnabled whether missing backend password aliases are retried
+     */
+    void setPasswordAliasRetryEnabled(boolean passwordAliasRetryEnabled) {
+        this.passwordAliasRetryEnabled = passwordAliasRetryEnabled;
     }
 
     /**
@@ -116,9 +138,13 @@ public class KnoxLDAPServerManager {
         this.port = config.getLDAPPort();
         this.baseDn = config.getLDAPBaseDN();
         this.bindUser = config.getLDAPBindUser();
+        validateBindUser();
+        this.dnMappingEnabled = config.getLDAPDnMappingEnabled();
 
         maxSizeLimit = config.getLDAPMaxSizeLimit();
         maxTimeLimit = config.getLDAPMaxTimeLimit();
+        passwordAliasRetryAttempts = passwordAliasRetryEnabled ? Math.max(0, config.getLDAPBackendPasswordAliasRetryAttempts()) : 0;
+        passwordAliasRetryIntervalMs = Math.max(0, config.getLDAPBackendPasswordAliasRetryIntervalMs());
 
         // Secure (LDAPS) transport configuration. When enabled but no dedicated keystore is
         // configured, fall back to the gateway identity keystore so the embedded server can
@@ -145,15 +171,29 @@ public class KnoxLDAPServerManager {
         workDir.mkdirs();
     }
 
+    /**
+     * Validates that the bind dn, if configured, matches the base dn for the embedded
+     * LDAP service (e.g. {@code ou=system} or {@code ou=people,<baseDn>}).
+     */
+    private void validateBindUser() throws Exception {
+        if (!StringUtils.isBlank(bindUser)) {
+            Dn bindUserDn = new Dn(bindUser);
+            if (!(bindUserDn.isDescendantOf("ou=system") || bindUserDn.isDescendantOf("ou=people," + this.baseDn))) {
+                throw new IllegalArgumentException("Bind user must be a descendant of ou=system or ou=people," + this.baseDn);
+            }
+        }
+    }
+
     private void createInterceptors(GatewayConfig config) throws Exception {
         List<String> interceptorNames = config.getLDAPInterceptorNames();
-        List<Interceptor> interceptors = new ArrayList<>(interceptorNames.size());
+        List<Map.Entry<String, Map<String, String>>> interceptorConfigs = new ArrayList<>(interceptorNames.size());
         for (String interceptorName : interceptorNames) {
             // Get backend-specific configuration using prefixed properties
             final Map<String, String> interceptorConfig = config.getLDAPInterceptorConfig(interceptorName);
 
             // Add common configuration
             interceptorConfig.put("baseDn", baseDn);
+            interceptorConfig.put("dnMappingEnabled", String.valueOf(dnMappingEnabled));
             if (!interceptorConfig.containsKey("maxResultSetSize")) {
                 // Set the backend to return more results than the proxy's size limit.
                 // This will ensure that the proxy will return "Size limit exceeded"
@@ -172,9 +212,82 @@ public class KnoxLDAPServerManager {
                 }
             }
 
-            interceptors.add(InterceptorFactory.createInterceptor(config, gatewayServices, interceptorName, interceptorConfig));
+            interceptorConfigs.add(Map.entry(interceptorName, interceptorConfig));
+        }
+
+        resolveBackendPasswordAliases(interceptorConfigs);
+
+        List<Interceptor> interceptors = new ArrayList<>(interceptorConfigs.size());
+        for (Map.Entry<String, Map<String, String>> interceptorConfig : interceptorConfigs) {
+            interceptors.add(InterceptorFactory.createInterceptor(config, gatewayServices, interceptorConfig.getKey(), interceptorConfig.getValue()));
         }
         this.interceptors = interceptors;
+    }
+
+    /**
+     * Resolves gateway credential-store alias references (e.g. {@code ${ALIAS=my-ad-password}}) held in the
+     * backend password properties, replacing each with the secret fetched from the gateway credential store.
+     * Literal (non-alias) values are left untouched for backward compatibility.
+     * <p>
+     * An alias not (yet) present in the credential store is looked up again up to
+     * {@link GatewayConfig#LDAP_BACKEND_PASSWORD_ALIAS_RETRY_ATTEMPTS} times, so a secret persisted shortly after the
+     * configuration was loaded is still picked up. All pending aliases are retried together, so the total wait is
+     * bounded by attempts x interval regardless of how many aliases are missing. An alias still unresolved after
+     * the last attempt is left as-is and logged at ERROR, so the backend bind fails rather than silently using a
+     * different credential.
+     */
+    private void resolveBackendPasswordAliases(List<Map.Entry<String, Map<String, String>>> interceptorConfigs) {
+        List<PendingAlias> pendingAliases = new ArrayList<>();
+        for (Map.Entry<String, Map<String, String>> interceptorConfig : interceptorConfigs) {
+            for (String key : BACKEND_PASSWORD_KEYS) {
+                final String value = interceptorConfig.getValue().get(key);
+                if (StringUtils.isNotBlank(value) && aliasService.isAlias(value)) {
+                    pendingAliases.add(new PendingAlias(interceptorConfig.getKey(), interceptorConfig.getValue(), key, aliasService.extractAlias(value)));
+                }
+            }
+        }
+
+        for (int retry = 1; ; retry++) {
+            pendingAliases.removeIf(this::resolveBackendPasswordAlias);
+            if (pendingAliases.isEmpty() || retry > passwordAliasRetryAttempts) {
+                break;
+            }
+            for (PendingAlias pending : pendingAliases) {
+                LOG.ldapBackendPasswordAliasRetrying(pending.alias(), pending.key(), pending.interceptorName(),
+                        passwordAliasRetryIntervalMs, retry, passwordAliasRetryAttempts);
+            }
+            try {
+                Thread.sleep(passwordAliasRetryIntervalMs);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+
+        for (PendingAlias pending : pendingAliases) {
+            LOG.ldapBackendPasswordAliasNotFound(pending.alias(), pending.key(), pending.interceptorName());
+        }
+    }
+
+    /**
+     * @return true if the alias needs no further lookups (it was resolved, or the lookup failed with an error);
+     * false if it was not found in the credential store
+     */
+    private boolean resolveBackendPasswordAlias(PendingAlias pending) {
+        try {
+            final char[] password = aliasService.getPasswordFromAliasForGateway(pending.alias());
+            if (password == null) {
+                return false;
+            }
+            pending.interceptorConfig().put(pending.key(), new String(password));
+            LOG.ldapBackendPasswordAliasResolved(pending.key(), pending.interceptorName());
+        } catch (AliasServiceException e) {
+            LOG.ldapBackendPasswordAliasResolutionFailed(pending.alias(), pending.key(), pending.interceptorName(), e);
+        }
+        return true;
+    }
+
+    private record PendingAlias(String interceptorName, Map<String, String> interceptorConfig, String key, String alias) {
     }
 
     /**
@@ -233,17 +346,16 @@ public class KnoxLDAPServerManager {
         final String bindPassword = bindPasswordChars == null ? null : new String(bindPasswordChars);
         final boolean requireBind = StringUtils.isNotBlank(bindUser) && StringUtils.isNotBlank(bindPassword);
         directoryService.setAllowAnonymousAccess(!requireBind);
+        if (requireBind) {
+            configureInMemoryBindUser(bindPassword);
+            LOG.ldapBindUserConfigured(bindUser);
+        }
 
         // Start the service
         directoryService.startup();
 
         // Add base entries to the partitions
         createBaseEntries(baseDns, schemaManager);
-
-        if (requireBind) {
-            createBindUser(schemaManager, bindPassword);
-            LOG.ldapBindUserConfigured(bindUser);
-        }
 
         // Create LDAP server on configured port
         ldapServer = new LdapServer();
@@ -435,22 +547,31 @@ public class KnoxLDAPServerManager {
     }
 
     /**
-     * Create the entry used by external clients to bind against the embedded LDAP server.
-     * The bind DN's parent container (e.g. {@code ou=system} or {@code ou=people,<baseDn>})
-     * must already exist. The entry is added using the privileged admin session, which is
-     * unaffected by the anonymous-access setting.
+     * Configure the Authenticator used by external clients to bind against the embedded LDAP server.
      */
-    private void createBindUser(SchemaManager schemaManager, String bindPassword) throws Exception {
-        Dn bindDn = new Dn(schemaManager, bindUser);
-        if (!directoryService.getAdminSession().exists(bindDn)) {
-            String rdnValue = bindDn.getRdn().getValue();
-            Entry bindEntry = new DefaultEntry(schemaManager);
-            bindEntry.setDn(bindDn);
-            bindEntry.add("objectClass", "top", "person", "organizationalPerson", "inetOrgPerson");
-            bindEntry.add("cn", rdnValue);
-            bindEntry.add("sn", rdnValue);
-            bindEntry.add("userPassword", bindPassword);
-            directoryService.getAdminSession().add(bindEntry);
+    private void configureInMemoryBindUser(String bindPassword) throws Exception {
+        Dn bindDn = new Dn(directoryService.getSchemaManager(), bindUser);
+
+        Interceptor interceptor = directoryService.getInterceptor(InterceptorEnum.AUTHENTICATION_INTERCEPTOR.getName());
+        if (interceptor instanceof AuthenticationInterceptor authInterceptor) {
+            InMemoryBindAuthenticator inMemoryBindAuthenticator = new InMemoryBindAuthenticator(bindDn,  bindPassword);
+
+            // Create an ordered set so that in-memory authenticator will have priority over
+            // the default SIMPLE authenticator.
+            Set<Authenticator> authenticators = new LinkedHashSet<>();
+            authenticators.add(inMemoryBindAuthenticator);
+            authenticators.addAll(authInterceptor.getAuthenticators());
+            authInterceptor.setAuthenticators(authenticators);
+        } else {
+            throw new IllegalStateException("Unable to configure AuthenticationInterceptor for bind user");
+        }
+
+        // The bind user may live in the same namespace as the proxied users (ou=people,<baseDn>), so
+        // tell the backend interceptors to leave its bind to the in-memory authenticator.
+        for (Interceptor knoxInterceptor : interceptors) {
+            if (knoxInterceptor instanceof UserSearchInterceptor userSearchInterceptor) {
+                userSearchInterceptor.setLocalBindDn(bindDn);
+            }
         }
     }
 
@@ -468,6 +589,16 @@ public class KnoxLDAPServerManager {
      * @return List of group names
      */
     public List<String> getUserGroups(String username) throws Exception {
+        return lookupUserGroups(username).groups();
+    }
+
+    /**
+     * Get groups for a user from the configured backend, along with whether the roles lookup
+     * interceptor ran the roles lookup for that user
+     * @param username The username
+     * @return the group names and whether the roles lookup was applied
+     */
+    public UserGroupsLookupResult lookupUserGroups(String username) throws Exception {
         SearchRequest searchRequest = new SearchRequestImpl();
         searchRequest.setBase(new Dn(directoryService.getSchemaManager(), baseDn));
         searchRequest.setScope(SearchScope.SUBTREE);
@@ -475,8 +606,10 @@ public class KnoxLDAPServerManager {
         searchRequest.addAttributes("*");
 
         List<String> groups = new ArrayList<>();
+        boolean userFound = false;
         try (Cursor<Entry> cursor = directoryService.getAdminSession().search(searchRequest)) {
             if (cursor.next()) {
+                userFound = true;
                 Entry entry = cursor.get();
                 Attribute memberOf = entry.get("memberOf");
                 if (memberOf != null) {
@@ -498,11 +631,8 @@ public class KnoxLDAPServerManager {
                 }
             }
         }
-        return groups;
-    }
-
-    public boolean hasRolesLookupInterceptor() {
-        return hasRolesLookupInterceptor;
+        // The roles lookup interceptor looks up roles for each user entry the search returns: no entry, no lookup
+        return new UserGroupsLookupResult(groups, userFound && hasRolesLookupInterceptor);
     }
 
     /**

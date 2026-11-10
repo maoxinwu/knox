@@ -44,14 +44,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import javax.servlet.ServletContext;
-import javax.servlet.ServletOutputStream;
-import javax.servlet.http.Cookie;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
-import javax.servlet.http.HttpServletResponseWrapper;
-import javax.ws.rs.WebApplicationException;
-import javax.ws.rs.core.Response;
+import jakarta.servlet.ServletContext;
+import jakarta.servlet.ServletOutputStream;
+import jakarta.servlet.http.Cookie;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import jakarta.servlet.http.HttpServletResponseWrapper;
+import jakarta.ws.rs.WebApplicationException;
+import jakarta.ws.rs.core.Response;
 
 import com.nimbusds.jose.proc.JOSEObjectTypeVerifier;
 import com.nimbusds.jose.proc.SecurityContext;
@@ -146,6 +146,44 @@ public class WebSSOResourceTest {
     verifier = EasyMock.createNiceMock(ConcurrentSessionVerifier.class);
     EasyMock.expect(verifier.verifySessionForUser(anyString())).andReturn(concurrentSessionVerifyResult).anyTimes();
     EasyMock.expect(verifier.registerToken(anyString(), anyObject())).andReturn(concurrentSessionVerifyResult).anyTimes();
+    EasyMock.expect(services.getService(ServiceType.CONCURRENT_SESSION_VERIFIER)).andReturn(verifier).anyTimes();
+
+    EasyMock.replay(principal, services, context, request, verifier);
+  }
+
+  private void configureCookieExpectations(String cookieValue, String whitelistRegex) throws Exception {
+    context = EasyMock.createNiceMock(ServletContext.class);
+    EasyMock.expect(context.getAttribute(GatewayConfig.GATEWAY_CONFIG_ATTRIBUTE)).andReturn(expectGatewayConfig()).anyTimes();
+    EasyMock.expect(context.getInitParameter("knoxsso.redirect.whitelist.regex")).andReturn(whitelistRegex).anyTimes();
+
+    request = EasyMock.createNiceMock(HttpServletRequest.class);
+    EasyMock.expect(request.getCookies())
+        .andReturn(new Cookie[]{new Cookie("original-url", cookieValue)}).anyTimes();
+    EasyMock.expect(request.getAttribute("targetServiceRole")).andReturn("KNOXSSO").anyTimes();
+    EasyMock.expect(request.getServletContext()).andReturn(context).anyTimes();
+    EasyMock.expect(request.getServerName()).andReturn("localhost").anyTimes();
+
+    Principal principal = EasyMock.createNiceMock(Principal.class);
+    EasyMock.expect(principal.getName()).andReturn("alice").anyTimes();
+    EasyMock.expect(request.getUserPrincipal()).andReturn(principal).anyTimes();
+
+    GatewayServices services = EasyMock.createNiceMock(GatewayServices.class);
+    EasyMock.expect(context.getAttribute(GatewayServices.GATEWAY_SERVICES_ATTRIBUTE)).andReturn(services).anyTimes();
+
+    AliasService aliasService = EasyMock.createNiceMock(AliasService.class);
+    EasyMock.expect(services.getService(ServiceType.ALIAS_SERVICE)).andReturn(aliasService).anyTimes();
+    EasyMock.expect(aliasService.getPasswordFromAliasForGateway(TokenUtils.SIGNING_HMAC_SECRET_ALIAS)).andReturn(null).anyTimes();
+
+    authority = new TestJWTokenAuthority(gatewayPublicKey, gatewayPrivateKey);
+    EasyMock.expect(services.getService(ServiceType.TOKEN_SERVICE)).andReturn(authority).anyTimes();
+
+    HttpServletResponse response = EasyMock.createNiceMock(HttpServletResponse.class);
+    ServletOutputStream outputStream = EasyMock.createNiceMock(ServletOutputStream.class);
+    responseWrapper = new CookieResponseWrapper(response, outputStream);
+
+    verifier = EasyMock.createNiceMock(ConcurrentSessionVerifier.class);
+    EasyMock.expect(verifier.verifySessionForUser(anyString())).andReturn(true).anyTimes();
+    EasyMock.expect(verifier.registerToken(anyString(), anyObject())).andReturn(true).anyTimes();
     EasyMock.expect(services.getService(ServiceType.CONCURRENT_SESSION_VERIFIER)).andReturn(verifier).anyTimes();
 
     EasyMock.replay(principal, services, context, request, verifier);
@@ -471,6 +509,121 @@ public class WebSSOResourceTest {
       int status = e.getResponse().getStatus();
       assertEquals(HttpStatus.SC_BAD_REQUEST, status);
     }
+  }
+
+  @Test
+  public void testUserInfoOriginalURLRejected() throws Exception {
+    ServletContext context = EasyMock.createNiceMock(ServletContext.class);
+    EasyMock.expect(context.getAttribute(GatewayConfig.GATEWAY_CONFIG_ATTRIBUTE)).andReturn(expectGatewayConfig()).anyTimes();
+
+    HttpServletRequest request = EasyMock.createNiceMock(HttpServletRequest.class);
+    EasyMock.expect(request.getParameter("originalUrl")).andReturn(
+        "https://localhost:8443%2f@malicious.link/");
+    EasyMock.expect(request.getAttribute("targetServiceRole")).andReturn("KNOXSSO").anyTimes();
+    EasyMock.expect(request.getParameterMap()).andReturn(Collections.emptyMap());
+    EasyMock.expect(request.getServletContext()).andReturn(context).anyTimes();
+    EasyMock.expect(request.getServerName()).andReturn("localhost").anyTimes();
+
+    Principal principal = EasyMock.createNiceMock(Principal.class);
+    EasyMock.expect(principal.getName()).andReturn("alice").anyTimes();
+    EasyMock.expect(request.getUserPrincipal()).andReturn(principal).anyTimes();
+
+    GatewayServices services = EasyMock.createNiceMock(GatewayServices.class);
+    EasyMock.expect(context.getAttribute(GatewayServices.GATEWAY_SERVICES_ATTRIBUTE)).andReturn(services);
+
+    AliasService aliasService = EasyMock.createNiceMock(AliasService.class);
+    EasyMock.expect(services.getService(ServiceType.ALIAS_SERVICE)).andReturn(aliasService).anyTimes();
+    EasyMock.expect(aliasService.getPasswordFromAliasForGateway(TokenUtils.SIGNING_HMAC_SECRET_ALIAS)).andReturn(null).anyTimes();
+
+    JWTokenAuthority authority = new TestJWTokenAuthority(gatewayPublicKey, gatewayPrivateKey);
+    EasyMock.expect(services.getService(ServiceType.TOKEN_SERVICE)).andReturn(authority);
+
+    HttpServletResponse response = EasyMock.createNiceMock(HttpServletResponse.class);
+    ServletOutputStream outputStream = EasyMock.createNiceMock(ServletOutputStream.class);
+    CookieResponseWrapper responseWrapper = new CookieResponseWrapper(response, outputStream);
+
+    EasyMock.replay(principal, services, context, request);
+
+    WebSSOResource webSSOResponse = new WebSSOResource();
+    webSSOResponse.request = request;
+    webSSOResponse.response = responseWrapper;
+    webSSOResponse.context = context;
+    webSSOResponse.init();
+
+    WebApplicationException e = Assert.assertThrows(WebApplicationException.class, webSSOResponse::doGet);
+    assertEquals(HttpStatus.SC_BAD_REQUEST, e.getResponse().getStatus());
+  }
+
+  @Test
+  public void testWhitelistValidationAppliedToOriginalUrlCookie() throws Exception {
+    configureCookieExpectations("https://malicious.link/phish", "^https?://localhost(:[0-9]+)?(/.*)?$");
+
+    WebSSOResource webSSOResponse = new WebSSOResource();
+    webSSOResponse.request = request;
+    webSSOResponse.response = responseWrapper;
+    webSSOResponse.context = context;
+    webSSOResponse.init();
+
+    WebApplicationException e = Assert.assertThrows(WebApplicationException.class, webSSOResponse::doGet);
+    assertEquals(HttpStatus.SC_BAD_REQUEST, e.getResponse().getStatus());
+    assertTrue(e.getMessage().contains("Original URL not valid for redirect"));
+  }
+
+  @Test
+  public void testUserInfoInOriginalUrlCookieRejected() throws Exception {
+    configureCookieExpectations("https://localhost:8443%2f@malicious.link/", null);
+
+    WebSSOResource webSSOResponse = new WebSSOResource();
+    webSSOResponse.request = request;
+    webSSOResponse.response = responseWrapper;
+    webSSOResponse.context = context;
+    webSSOResponse.init();
+
+    WebApplicationException e = Assert.assertThrows(WebApplicationException.class, webSSOResponse::doGet);
+    assertEquals(HttpStatus.SC_BAD_REQUEST, e.getResponse().getStatus());
+    assertTrue(e.getMessage().contains("Original URL not valid for redirect"));
+  }
+
+  @Test
+  public void testEmptyOriginalUrlCookieRejected() throws Exception {
+    configureCookieExpectations("", null);
+
+    WebSSOResource webSSOResponse = new WebSSOResource();
+    webSSOResponse.request = request;
+    webSSOResponse.response = responseWrapper;
+    webSSOResponse.context = context;
+    webSSOResponse.init();
+
+    WebApplicationException e = Assert.assertThrows(WebApplicationException.class, webSSOResponse::doGet);
+    assertEquals(HttpStatus.SC_BAD_REQUEST, e.getResponse().getStatus());
+    assertTrue(e.getMessage().contains("Original URL not found in the request"));
+  }
+
+  @Test
+  public void testValidOriginalUrlCookieIsRemoved() throws Exception {
+    final String originalUrl = "https://localhost:8443/gateway/homepage/home";
+    configureCookieExpectations(originalUrl, "^https?://localhost(:[0-9]+)?(/.*)?$");
+
+    WebSSOResource webSSOResponse = new WebSSOResource();
+    webSSOResponse.request = request;
+    webSSOResponse.response = responseWrapper;
+    webSSOResponse.context = context;
+    webSSOResponse.init();
+
+    Response resp = webSSOResponse.doGet();
+
+    Cookie cookie = responseWrapper.getCookie("hadoop-jwt");
+    assertNotNull(cookie);
+    JWT parsedToken = new JWTToken(cookie.getValue());
+    assertEquals("alice", parsedToken.getSubject());
+    assertTrue(authority.verifyToken(parsedToken));
+
+    assertEquals(originalUrl, resp.getLocation().toString());
+
+    Cookie originalUrlCookie = responseWrapper.getCookie("original-url");
+    assertNotNull(originalUrlCookie);
+    assertEquals(0, originalUrlCookie.getMaxAge());
+    assertEquals(WebSSOResource.RESOURCE_PATH, originalUrlCookie.getPath());
   }
 
   private GatewayConfig expectGatewayConfig() {

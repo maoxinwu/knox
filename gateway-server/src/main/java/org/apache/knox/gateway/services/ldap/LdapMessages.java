@@ -102,28 +102,44 @@ public interface LdapMessages {
     void ldapSampleDataCreated(String path);
 
     @Message(level = MessageLevel.DEBUG,
-            text = "LDAP Search: {0} | {1}")
-    void ldapSearch(String baseDn, String filter);
+            text = "LDAP Search: {0} | {1} | {2}")
+    void ldapSearch(String baseDn, String filter, String attributes);
 
     @Message(level = MessageLevel.DEBUG,
             text = "LDAP Paged Search: {0} | {1}, page size {2}, page {3}")
     void ldapPagedSearch(String baseDn, String filter, int pageSize, int pageNumber);
 
+    @Message(level = MessageLevel.INFO,
+            text = "LDAP filter of length {0} exceeds the maximum filter length {1}; splitting into {2} searches")
+    void ldapFilterSplit(int filterLength, int maxFilterLength, int numSearches);
+
     @Message(level = MessageLevel.ERROR,
-            text = "LDAP Paged Search Exceeded Max Result Set Size: {0} | {1}")
+            text = "LDAP Paged Search Exceeded Max Result Set Size: {0} | {1}. Truncating results.")
     void ldapPagedSearchExceededMaxResultSetSize(int resultSetSize, int maxResultSetSize);
 
     @Message(level = MessageLevel.DEBUG,
-            text = "LDAP Paged Search Completed: {0} | {1}")
-    void ldapPagedSearchCompleted(String baseDn, String filter);
+            text = "LDAP Paged Search Completed: {0} | {1}. Found {2} entries")
+    void ldapPagedSearchCompleted(String baseDn, String filter, int numResults);
 
     @Message(level = MessageLevel.ERROR,
-            text = "LDAP Search failed: {0} | {1}, {2}")
-    void ldapSearchFailed(String baseDn, String filter, @StackTrace(level = MessageLevel.DEBUG) Exception e);
+            text = "LDAP Search to backend {0} failed: {1} | {2}, {3}")
+    void ldapSearchFailed(String name, String baseDn, String filter, @StackTrace(level = MessageLevel.DEBUG) Exception e);
 
     @Message(level = MessageLevel.DEBUG,
             text = "LDAP Bind: {0}")
     void ldapBind(String dn);
+
+    @Message(level = MessageLevel.DEBUG,
+            text = "LDAP Bind: {0} is the in-memory bind user; not forwarding the bind to backend {1}")
+    void ldapLocalBindUser(String dn, String backendName);
+
+    @Message(level = MessageLevel.DEBUG,
+            text = "LDAP Search: base {0} does not exist locally; searching backend {1}")
+    void ldapSearchBaseNotFoundLocally(String baseDn, String backendName);
+
+    @Message(level = MessageLevel.DEBUG,
+            text = "LDAP Search: base {0} does not exist in backend {1}; returning the local entries only")
+    void ldapSearchBaseNotFoundInBackend(String baseDn, String backendName);
 
     @Message(level = MessageLevel.INFO,
             text = "Loaded user from backend: {0}")
@@ -153,11 +169,11 @@ public interface LdapMessages {
             text = "Failed to copy attribute: {0}")
     void ldapAttributeCopyError(@StackTrace(level = MessageLevel.TRACE) Exception e);
 
-    @Message(level = MessageLevel.DEBUG, text = "LDAP authentication succeeded for user: {0}")
-    void ldapAuthSucceeded(String user);
+    @Message(level = MessageLevel.DEBUG, text = "LDAP authentication to backend {0} succeeded for user: {1}")
+    void ldapAuthSucceeded(String name, String user);
 
-    @Message(level = MessageLevel.WARN, text = "LDAP authentication failed for user: {0}")
-    void ldapAuthFailed(String user, @StackTrace(level = MessageLevel.INFO) Throwable cause);
+    @Message(level = MessageLevel.WARN, text = "LDAP authentication to backend {0} failed for user: {1}, {2}")
+    void ldapAuthFailed(String name, String user, @StackTrace(level = MessageLevel.DEBUG) Throwable cause);
 
     @Message(level = MessageLevel.INFO,
             text = "Reloading LDAP configuration")
@@ -188,6 +204,9 @@ public interface LdapMessages {
     @Message(level = MessageLevel.DEBUG, text = "Created skeleton group entry for {0} as actual group entry was not found in the backend")
     void ldapSkeletonGroupEntryCreated(String groupDn);
 
+    @Message(level = MessageLevel.DEBUG, text = "Failed to create skeleton group entry for {0}")
+    void ldapSkeletonGroupEntryError(String groupDn, @StackTrace(level = MessageLevel.DEBUG) Exception e);
+
     @Message(level = MessageLevel.DEBUG, text = "Found {1} parent(s) in cache for group {0}")
     void ldapRecursiveGroupSearchCacheHit(String groupDn, int count);
 
@@ -200,6 +219,9 @@ public interface LdapMessages {
     @Message(level = MessageLevel.ERROR, text = "Failed to reload LDAP roles lookup: {0}")
     void ldapRolesLookupReloadFailed(@StackTrace(level = MessageLevel.DEBUG) Exception e);
 
+    @Message(level = MessageLevel.ERROR, text = "Failed to reload LDAP roles reverse lookup: {0}")
+    void ldapRolesReverseLookupReloadFailed(@StackTrace(level = MessageLevel.DEBUG) Exception e);
+
     @Message(level = MessageLevel.INFO, text = "LDAP roles lookup is enabled with strategy: {0}")
     void ldapRolesLookupEnabled(String strategy);
 
@@ -211,4 +233,49 @@ public interface LdapMessages {
 
     @Message(level = MessageLevel.ERROR, text = "Failed to lookup roles for user {0}: {1}")
     void ldapRolesLookupFailed(String user, @StackTrace(level = MessageLevel.DEBUG) Exception e);
+
+    @Message(level = MessageLevel.ERROR, text = "Failed to lookup users and groups for roles: {0}")
+    void ldapRolesReverseLookupFailed(@StackTrace(level = MessageLevel.DEBUG) Exception e);
+
+    @Message(level = MessageLevel.DEBUG, text = "Sending role lookup request to {0}: {1}")
+    void restRolesLookupRequest(String endpoint, String requestBody);
+
+    @Message(level = MessageLevel.DEBUG, text = "Received role lookup response from {0}: HTTP {1}, body: {2}")
+    void restRolesLookupResponse(String endpoint, int statusCode, String responseBody);
+
+    @Message(level = MessageLevel.ERROR, text = "Role lookup request to {0} failed with HTTP {1}, body: {2}")
+    void restRolesLookupHttpError(String endpoint, int statusCode, String responseBody);
+
+    @Message(level = MessageLevel.DEBUG, text = "Sending role list request to {0}")
+    void restRolesListRequest(String endpoint);
+
+    @Message(level = MessageLevel.DEBUG, text = "Received role list response from {0}: HTTP {1}, body: {2}")
+    void restRolesListResponse(String endpoint, int statusCode, String responseBody);
+
+    @Message(level = MessageLevel.ERROR, text = "Role list request to {0} failed with HTTP {1}, body: {2}")
+    void restRolesListHttpError(String endpoint, int statusCode, String responseBody);
+
+    @Message(level = MessageLevel.DEBUG, text = "Sending role get request to {0}: {1}")
+    void restRolesGetRequest(String endpoint, String roleId);
+
+    @Message(level = MessageLevel.DEBUG, text = "Received role get response from {0}: HTTP {1}, body: {2}")
+    void restRolesGetResponse(String endpoint, int statusCode, String responseBody);
+
+    @Message(level = MessageLevel.ERROR, text = "Role get request to {0} failed with HTTP {1}, body: {2}")
+    void restRolesGetHttpError(String endpoint, int statusCode, String responseBody);
+
+    @Message(level = MessageLevel.ERROR, text = "Role assigneee member type for role {0} unknown: {1}")
+    void restRolesAssigneeTypeUnknown(String role, String memberType);
+
+    @Message(level = MessageLevel.DEBUG, text = "Resolved gateway credential store alias for LDAP backend property {0} (interceptor {1})")
+    void ldapBackendPasswordAliasResolved(String property, String interceptorName);
+
+    @Message(level = MessageLevel.ERROR, text = "No value found in the gateway credential store for alias {0} referenced by LDAP backend property {1} (interceptor {2}); the backend bind will fail until the alias is defined")
+    void ldapBackendPasswordAliasNotFound(String alias, String property, String interceptorName);
+
+    @Message(level = MessageLevel.WARN, text = "No value found yet in the gateway credential store for alias {0} referenced by LDAP backend property {1} (interceptor {2}); retrying in {3,number,#} ms (retry {4} of {5})")
+    void ldapBackendPasswordAliasRetrying(String alias, String property, String interceptorName, int retryIntervalMs, int retry, int retryAttempts);
+
+    @Message(level = MessageLevel.ERROR, text = "Failed to resolve gateway credential store alias {0} for LDAP backend property {1} (interceptor {2}): {3}")
+    void ldapBackendPasswordAliasResolutionFailed(String alias, String property, String interceptorName, @StackTrace(level = MessageLevel.DEBUG) Exception e);
 }

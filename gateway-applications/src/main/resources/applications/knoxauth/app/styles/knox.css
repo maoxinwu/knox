@@ -1584,7 +1584,14 @@ table.table.backgrid thead th.repoName {
 /* Login Page */
 body.login {
   background: #292929;
+  margin: 0;
   padding: 0;
+  box-sizing: border-box;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
 }
 .login #signin-container {
   margin: 0 auto;
@@ -1609,6 +1616,46 @@ body.login {
 .login #signout-container p {
   font-size: 14px;
   line-height: 1.6;
+}
+.login #signout-container .signout-title {
+  color: gray;
+}
+.login #signout-container .signout-message {
+  color: white;
+  display: block;
+}
+.login #signout-container .signout-error-title {
+  color: red;
+}
+.login #signout-container .signout-error {
+  background: gray;
+  text-align: center;
+}
+.login #signout-container .signout-error-message {
+  color: white;
+}
+.login #signout-container form fieldset {
+  border: none;
+  margin: 0;
+  padding: 0;
+}
+.login #signout-container form .btn {
+  margin-top: 15px;
+}
+.login #signout-container .signout-global-form .btn {
+  margin-top: 8px;
+}
+.login #signout-container .signout-secondary {
+  text-align: center;
+  margin: 12px 0 0;
+  font-size: 14px;
+}
+.login #signout-container .signout-secondary a {
+  color: #06A;
+  text-decoration: none;
+}
+.login #signout-container .signout-secondary a:hover {
+  text-decoration: underline;
 }
 .login .l-logo {
   text-align: center;
@@ -1636,11 +1683,15 @@ body.login {
   top: 50%;
   transform: translateY(-50%);
   margin: 0;
-  animation: spin 1s linear infinite;
+  animation: knox-sign-in-spin 1s linear infinite;
 }
-@keyframes spin {
+@keyframes knox-sign-in-spin {
   from { transform: translateY(-50%) rotate(0deg); }
   to { transform: translateY(-50%) rotate(360deg); }
+}
+@keyframes knox-sign-in-spin-inline {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 .login form .btn,
 .login input {
@@ -1984,4 +2035,75 @@ input[type="radio"], input[type="checkbox"] {margin-top: 0;}
     margin-left: -5px;
     margin-top: -2px;
     font-size: 11px;
+}
+
+.or-separator {
+  display: flex;
+  align-items: center;
+  text-align: center;
+  margin: 20px auto;
+  width: 250px; /* or whatever fits your design */
+  color: #888;
+  font-family: sans-serif;
+  font-size: 14px;
+}
+
+.or-separator::before,
+.or-separator::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: #ccc;
+}
+
+.or-separator::before {
+  margin-right: 8px;
+}
+
+.or-separator::after {
+  margin-left: 8px;
+}
+
+#federated-op-container {
+  margin: 20px auto 0; /* auto left/right centers it */
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: fit-content; /* shrink to fit content */
+}
+
+#federated-op-container:empty {
+  display: none;
+}
+
+.fed-op-btn {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-radius: 6px;
+  background: #f7f7f7;
+  border: 1px solid #d0d0d0;
+  cursor: pointer;
+  font-family: sans-serif;
+  font-size: 15px;
+  transition: background 0.2s, transform 0.1s;
+  user-select: none;
+}
+
+.fed-op-btn:hover {
+  background: #ececec;
+}
+
+.fed-op-btn:active {
+  transform: scale(0.97);
+}
+
+.fed-op-icon {
+  font-size: 18px;
+}
+
+.fed-op-label {
+  flex: 1;
+  text-align: left;
 }

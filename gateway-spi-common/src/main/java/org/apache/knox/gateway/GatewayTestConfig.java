@@ -1058,7 +1058,7 @@ public class GatewayTestConfig extends Configuration implements GatewayConfig {
 
   @Override
   public String getDatabaseType() {
-    return "derbydb";
+    return "h2";
   }
 
   @Override
@@ -1096,6 +1096,16 @@ public class GatewayTestConfig extends Configuration implements GatewayConfig {
   @Override
   public String getDatabaseSslTruststoreFileName() {
     return null;
+  }
+
+  @Override
+  public boolean isDatabaseH2EncryptionEnabled() {
+    return false;
+  }
+
+  @Override
+  public String getDatabaseH2EncryptionPassphraseAlias() {
+    return "h2_encryption_passphrase";
   }
 
   @Override
@@ -1331,6 +1341,16 @@ public class GatewayTestConfig extends Configuration implements GatewayConfig {
   }
 
   @Override
+  public String getLdapRolesGetRestApiEndpoint() {
+    return "";
+  }
+
+  @Override
+  public String getLdapRolesListRestApiEndpoint() {
+    return "";
+  }
+
+  @Override
   public String getLdapRolesLookupFilePath() {
     return "";
   }
@@ -1366,7 +1386,78 @@ public class GatewayTestConfig extends Configuration implements GatewayConfig {
   }
 
   @Override
+  public boolean getLDAPDnMappingEnabled() {
+    return true;
+  }
+
+  @Override
+  public int getLDAPBackendPasswordAliasRetryAttempts() {
+    return 0;
+  }
+
+  @Override
+  public int getLDAPBackendPasswordAliasRetryIntervalMs() {
+    return 0;
+  }
+
+  @Override
   public boolean getGroupUIServicesOnHomepage() {
     return false;
   }
+
+  @Override
+  public int getTrustedOidcIssuerMaxTrustedIssuers() {
+    return 0;
+  }
+
+  @Override
+  public int getTrustedOidcIssuerRegistryCacheTtlSecs() {
+    return 0;
+  }
+
+  @Override
+  public int getTrustedOidcIssuerDiscoveryCacheTtlSecs() {
+    return 0;
+  }
+
+  @Override
+  public int getTrustedOidcIssuerDiscoveryConnectTimeoutMs() {
+    return 0;
+  }
+
+  @Override
+  public int getTrustedOidcIssuerDiscoveryReadTimeoutMs() {
+    return 0;
+  }
+
+  @Override
+  public int getTrustedOidcIssuerCaSecretMaxAgeSecs() {
+    return TRUSTED_OIDC_ISSUER_CA_SECRET_MAX_AGE_SECS_DEFAULT;
+  }
+
+  @Override
+  public int getKnoxIDFFederatedOpConnectTimeoutMs() {
+    return KNOXIDF_FEDERATED_OP_CONNECT_TIMEOUT_MS_DEFAULT;
+  }
+
+  @Override
+  public int getKnoxIDFFederatedOpReadTimeoutMs() {
+    return KNOXIDF_FEDERATED_OP_READ_TIMEOUT_MS_DEFAULT;
+  }
+
+  @Override
+  public int getDelegationServiceTokenTtlSec() {
+    return DELEGATION_SERVICE_TOKEN_TTL_SEC_DEFAULT;
+  }
+
+  @Override
+  public int getDelegationServiceListMaxTotal() {
+    return DELEGATION_SERVICE_LIST_MAX_TOTAL_DEFAULT;
+  }
+
+  @Override
+  public int getDelegationServiceListMaxPerAuthority() {
+    return DELEGATION_SERVICE_LIST_MAX_PER_AUTHORITY_DEFAULT;
+  }
+
 }

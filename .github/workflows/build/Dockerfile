@@ -17,7 +17,8 @@ FROM eclipse-temurin:17-jre
 
 MAINTAINER moresandeep
 
-RUN useradd -ms /bin/bash gateway
+# Install dependencies
+RUN apt-get update && apt-get install -y git && useradd -ms /bin/bash gateway
 
 # Create temporary directories for extraction
 RUN mkdir -p /tmp/knox-artifacts /tmp/knoxshell-artifacts /knox-runtime /knoxshell /knox-runtime/knoxshell
@@ -41,8 +42,22 @@ ADD .github/workflows/build/gateway-site.xml /knox-runtime/conf/gateway-site.xml
 ADD .github/workflows/build/conf/topologies/knoxtoken.xml /knox-runtime/conf/topologies/knoxtoken.xml
 ADD .github/workflows/build/conf/topologies/health.xml /knox-runtime/conf/topologies/health.xml
 ADD .github/workflows/build/conf/topologies/knoxldap.xml /knox-runtime/conf/topologies/knoxldap.xml
+ADD .github/workflows/build/conf/topologies/ldapusersearchfilter.xml /knox-runtime/conf/topologies/ldapusersearchfilter.xml
+ADD .github/workflows/build/conf/topologies/knoxldapcache.xml /knox-runtime/conf/topologies/knoxldapcache.xml
 ADD .github/workflows/build/conf/topologies/remoteauth.xml /knox-runtime/conf/topologies/remoteauth.xml
 ADD .github/workflows/build/conf/topologies/k8sauth.xml /knox-runtime/conf/topologies/k8sauth.xml
+ADD .github/workflows/build/conf/topologies/knoxidf-ldap.xml /knox-runtime/conf/topologies/knoxidf-ldap.xml
+ADD .github/workflows/build/conf/topologies/knoxidf-token.xml /knox-runtime/conf/topologies/knoxidf-token.xml
+ADD .github/workflows/build/conf/topologies/knoxidf-token-delegation.xml /knox-runtime/conf/topologies/knoxidf-token-delegation.xml
+ADD .github/workflows/build/conf/topologies/knoxidf-token-delegation-policy.xml /knox-runtime/conf/topologies/knoxidf-token-delegation-policy.xml
+ADD .github/workflows/build/conf/topologies/knoxidf-ldap-aud.xml /knox-runtime/conf/topologies/knoxidf-ldap-aud.xml
+ADD .github/workflows/build/conf/topologies/knoxidf-token-same-subject-aud.xml /knox-runtime/conf/topologies/knoxidf-token-same-subject-aud.xml
+ADD .github/workflows/build/conf/topologies/knoxidf-token-passthrough.xml /knox-runtime/conf/topologies/knoxidf-token-passthrough.xml
+ADD .github/workflows/build/conf/topologies/knoxsso.xml /knox-runtime/conf/topologies/knoxsso.xml
+ADD .github/workflows/build/conf/topologies/knoxidf-sso.xml /knox-runtime/conf/topologies/knoxidf-sso.xml
+ADD .github/workflows/build/conf/topologies/knoxauthtoken.xml /knox-runtime/conf/topologies/knoxauthtoken.xml
+ADD .github/workflows/build/conf/topologies/knoxauthtokenlimit.xml /knox-runtime/conf/topologies/knoxauthtokenlimit.xml
+ADD .github/workflows/build/conf/topologies/knoxauthtokencollide.xml /knox-runtime/conf/topologies/knoxauthtokencollide.xml
 
 RUN chown -R gateway /knox-runtime/
 

@@ -40,6 +40,7 @@ import java.nio.file.Paths;
 import java.nio.file.attribute.PosixFileAttributes;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.sql.Connection;
+import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
@@ -52,9 +53,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import javax.swing.SortOrder;
 
 import org.apache.commons.io.FileUtils;
-import org.apache.knox.gateway.shell.jdbc.Database;
-import org.apache.knox.gateway.shell.jdbc.derby.DerbyDatabase;
 import org.easymock.IAnswer;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -64,8 +65,18 @@ public class KnoxShellTableTest {
   @Rule
   public final TemporaryFolder testFolder = new TemporaryFolder();
 
-  private static final String SYSTEM_PROPERTY_DERBY_STREAM_ERROR_FILE = "derby.stream.error.file";
-  private static final String SAMPLE_DERBY_DATABASE_NAME = "sampleDerbyDatabase";
+  private static final String H2_DRIVER = "org.h2.Driver";
+  private static final String SAMPLE_JDBC_DATABASE_NAME = "sampleBooksDatabase";
+
+  @Before
+  public void setUp() {
+    KnoxShellTableCallHistory.getInstance().clear();
+  }
+
+  @After
+  public void tearDown() {
+    KnoxShellTableCallHistory.getInstance().clear();
+  }
 
   @Test
   public void testSimpleTableRendering() {
@@ -488,36 +499,32 @@ public class KnoxShellTableTest {
 
   @Test
   public void testJDBCBuilderUsingConnectionString() throws Exception {
-    System.setProperty(SYSTEM_PROPERTY_DERBY_STREAM_ERROR_FILE, "/dev/null");
-    final Path derbyDatabaseFolder = Paths.get(testFolder.newFolder().toPath().toString(), SAMPLE_DERBY_DATABASE_NAME);
-    Database derbyDatabase = null;
-    try {
-      derbyDatabase = prepareDerbyDatabase(derbyDatabaseFolder);
-      assertTrue(derbyDatabase.hasTable("BOOKS"));
-      final KnoxShellTable table = KnoxShellTable.builder().jdbc().driver(DerbyDatabase.EMBEDDED_DRIVER).connectTo(DerbyDatabase.PROTOCOL + derbyDatabaseFolder.toString())
+    final String jdbcUrl = "jdbc:h2:mem:" + SAMPLE_JDBC_DATABASE_NAME;
+    // Keep a connection open for the duration of the test so the in-memory H2 database (which is
+    // discarded when its last connection closes) survives until the builder opens its own.
+    try (Connection setupConnection = DriverManager.getConnection(jdbcUrl)) {
+      prepareBooksTable(setupConnection);
+      final KnoxShellTable table = KnoxShellTable.builder().jdbc().driver(H2_DRIVER).connectTo(jdbcUrl)
           .sql("select * from books");
       assertEquals(2, table.getRows().size());
       assertTrue(table.values("TITLE").containsAll(Arrays.asList("Apache Knox: The Definitive Guide", "Apache Knox: The Definitive Guide 2nd Edition")));
     } finally {
-      if (derbyDatabase != null) {
-        derbyDatabase.shutdown();
+      // Drop the in-memory database so a subsequent run starts clean.
+      try (Connection cleanup = DriverManager.getConnection(jdbcUrl);
+          Statement stmt = cleanup.createStatement()) {
+        stmt.execute("SHUTDOWN");
       }
-      System.clearProperty(SYSTEM_PROPERTY_DERBY_STREAM_ERROR_FILE);
     }
   }
 
-  private Database prepareDerbyDatabase(Path derbyDatabaseFolder) throws SQLException, IOException {
-    final Database derbyDatabase = new DerbyDatabase(derbyDatabaseFolder.toString());
-    derbyDatabase.create();
+  private void prepareBooksTable(Connection connection) throws SQLException, IOException {
     final String createTableSql = readFileToString(new File(getClass().getClassLoader().getResource("createBooksTable.sql").getFile()), UTF_8);
     final String insertDataSql = readFileToString(new File(getClass().getClassLoader().getResource("insertBooks.sql").getFile()), UTF_8);
-    try (Connection connection = derbyDatabase.getConnection();
-        Statement createTableStatment = connection.createStatement();
+    try (Statement createTableStatement = connection.createStatement();
         Statement insertDataStatement = connection.createStatement();) {
-      createTableStatment.execute(createTableSql);
+      createTableStatement.execute(createTableSql);
       insertDataStatement.execute(insertDataSql);
     }
-    return derbyDatabase;
   }
 
   @Test
@@ -526,7 +533,7 @@ public class KnoxShellTableTest {
     // it's quite hard to integrate AspectJ weaving together with JUnit so we
     // manually build up the history
     saveCall(table.id, "org.apache.knox.gateway.shell.table.KnoxShellTableBuilder", "jdbc", false, Collections.emptyMap());
-    saveCall(table.id, "org.apache.knox.gateway.shell.table.JDBCKnoxShellTableBuilder", "driver", false, singletonMap("org.apache.derby.jdbc.EmbeddedDriver", String.class));
+    saveCall(table.id, "org.apache.knox.gateway.shell.table.JDBCKnoxShellTableBuilder", "driver", false, singletonMap(H2_DRIVER, String.class));
     saveCall(table.id, "org.apache.knox.gateway.shell.table.JDBCKnoxShellTableBuilder", "username", false, singletonMap("myUserName", String.class));
     saveCall(table.id, "org.apache.knox.gateway.shell.table.JDBCKnoxShellTableBuilder", "pwd", false, singletonMap("myP4ssW0rd", String.class));
     saveCall(table.id, "org.apache.knox.gateway.shell.table.JDBCKnoxShellTableBuilder", "connectTo", false, singletonMap("myDBConnectionUrl", String.class));

@@ -91,13 +91,14 @@ import org.apache.knox.gateway.topology.Provider;
 import org.apache.knox.gateway.topology.Topology;
 import org.apache.knox.gateway.topology.validation.TopologyValidator;
 import org.apache.shiro.SecurityUtils;
+import org.apache.shiro.UnavailableSecurityManagerException;
 import org.apache.shiro.authc.AuthenticationException;
 import org.apache.shiro.authc.UsernamePasswordToken;
 import org.apache.shiro.config.ConfigurationException;
 import org.apache.shiro.config.Ini;
-import org.apache.shiro.config.IniSecurityManagerFactory;
+import org.apache.shiro.env.BasicIniEnvironment;
+import org.apache.shiro.lang.util.LifecycleUtils;
 import org.apache.shiro.subject.Subject;
-import org.apache.shiro.util.Factory;
 import org.apache.shiro.util.ThreadContext;
 import org.eclipse.persistence.oxm.MediaType;
 import org.jboss.shrinkwrap.api.exporter.ExplodedExporter;
@@ -143,6 +144,7 @@ public class KnoxCLI extends Configured implements Tool {
       "   [" + JWKGenerator.USAGE  + "]\n" +
       "   [" + GenerateDescriptorCommand.USAGE + "]\n" +
       "   [" + TokenMigration.USAGE  + "]\n" +
+      "   [" + DerbyTokenMigration.USAGE  + "]\n" +
       "   [" + CreateListAliasesCommand.USAGE + "]\n";
   private static final String CLUSTER_STRING_SEPARATOR = ",";
 
@@ -171,6 +173,7 @@ public class KnoxCLI extends Configured implements Tool {
   private boolean migrateExpiredTokens;
   private boolean verbose;
   private String alias;
+  private String derbyDatabase;
 
   private String remoteRegistryClient;
   private String remoteRegistryEntryName;
@@ -608,6 +611,10 @@ public class KnoxCLI extends Configured implements Tool {
         alias = args[++i];
       } else if (args[i].equalsIgnoreCase("migrate-tokens") ) {
         command = new TokenMigration();
+      } else if (args[i].equalsIgnoreCase("migrate-derby-tokens") ) {
+        command = new DerbyTokenMigration();
+      } else if (args[i].equalsIgnoreCase("--derbyDatabase") ) {
+        derbyDatabase = args[++i];
       } else if (args[i].equalsIgnoreCase("--progressCount") ) {
         progressCount = Integer.parseInt(args[++i]);
       } else if (args[i].equalsIgnoreCase("--archiveMigrated") ) {
@@ -710,6 +717,9 @@ public class KnoxCLI extends Configured implements Tool {
       out.println();
       out.println( div );
       out.println(CreateListAliasesCommand.USAGE + "\n\n" + CreateListAliasesCommand.DESC);
+      out.println();
+      out.println( div );
+      out.println(DerbyTokenMigration.USAGE + "\n\n" + DerbyTokenMigration.DESC);
       out.println();
       out.println( div );
     }
@@ -1769,6 +1779,8 @@ public class KnoxCLI extends Configured implements Tool {
       } catch ( Exception e ) {
         out.println(e.getCause());
         out.println(e.toString());
+      } finally {
+        destroySecurityManager();
       }
       return result;
     }
@@ -1866,9 +1878,7 @@ public class KnoxCLI extends Configured implements Tool {
     protected Subject getSubject(Ini config) throws BadSubjectException {
       try {
         ThreadContext.unbindSubject();
-        @SuppressWarnings("deprecation")
-        Factory factory = new IniSecurityManagerFactory(config);
-        org.apache.shiro.mgt.SecurityManager securityManager = (org.apache.shiro.mgt.SecurityManager) factory.getInstance();
+        org.apache.shiro.mgt.SecurityManager securityManager = new BasicIniEnvironment(config).getSecurityManager();
         SecurityUtils.setSecurityManager(securityManager);
         Subject subject = SecurityUtils.getSubject();
         if( subject != null) {
@@ -1880,6 +1890,25 @@ public class KnoxCLI extends Configured implements Tool {
         out.println(e.toString());
       }
       throw new BadSubjectException("Subject could not be created with Shiro Config at " + config);
+    }
+
+    /**
+     * Releases the Shiro {@link org.apache.shiro.mgt.SecurityManager} created for the
+     * current command by {@link #getSubject(Ini)}. The {@code DefaultSecurityManager}
+     * built by {@link BasicIniEnvironment} is {@code Destroyable} and can hold
+     * resources such as a cache manager and a session-validation scheduler thread, so
+     * it must be destroyed once the Subject is no longer needed to avoid leaking them.
+     * Null-safe and safe to call when no SecurityManager is currently set.
+     */
+    protected void destroySecurityManager() {
+      final org.apache.shiro.mgt.SecurityManager securityManager;
+      try {
+        securityManager = SecurityUtils.getSecurityManager();
+      } catch (UnavailableSecurityManagerException e) {
+        return; // nothing was set, nothing to release
+      }
+      LifecycleUtils.destroy(securityManager);
+      SecurityUtils.setSecurityManager(null);
     }
 
     protected Subject getSubject(String config) throws ConfigurationException {
@@ -2118,6 +2147,8 @@ public class KnoxCLI extends Configured implements Tool {
         if(debug){
           e.printStackTrace();
         }
+      } finally {
+        destroySecurityManager();
       }
       return groups;
     }
@@ -2820,6 +2851,41 @@ public class KnoxCLI extends Configured implements Tool {
 
     private boolean isTokenMigrationTarget(TokenStateService tokenStateService) {
       return tokenStateService instanceof TokenMigrationTarget;
+    }
+
+    @Override
+    public String getUsage() {
+      return USAGE + ":\n\n" + DESC;
+    }
+  }
+
+  public class DerbyTokenMigration extends Command {
+
+    static final String USAGE = "migrate-derby-tokens [--derbyDatabase path] [--verbose true|false]";
+    static final String DESC =
+        "Migrates Knox Tokens from a legacy embedded Apache Derby database into the currently configured JDBC token backend (the embedded H2 database by default).\n"
+            + "Prerequisites: the gateway must be stopped, and because Knox no longer ships the Apache Derby driver a Derby driver jar "
+            + "(e.g. derby-10.14.2.0.jar, the last version Knox shipped) has to be copied into $KNOX_GATEWAY_HOME/ext/ before running this command.\n"
+            + "Only tokens are migrated (the KNOX_TOKENS and KNOX_TOKEN_METADATA tables); those were the only tables persisted by Derby-shipping Knox releases.\n"
+            + "The command is safe to re-run: tokens already present in the destination are skipped.\n"
+            + "Options are as follows: \n"
+            + "--derbyDatabase (optional) the file system path of the legacy Derby database. Defaults to the 'tokens' folder under the gateway security directory.\n"
+            + "--verbose (optional) a boolean flag that controls a more verbose output on the STDOUT when processing tokens. Defaults to false.";
+
+    @Override
+    public void execute() throws Exception {
+      final TokenStateService tokenStateService = services.getService(ServiceType.TOKEN_STATE_SERVICE);
+      if (tokenStateService instanceof TokenMigrationTarget) {
+        final EmbeddedDerbyToH2TokenMigrationTool tool = new EmbeddedDerbyToH2TokenMigrationTool(getGatewayConfig(), getAliasService(), out);
+        if (derbyDatabase != null) {
+          tool.setDerbyDatabasePath(derbyDatabase);
+        }
+        tool.setVerbose(verbose);
+        tool.migrate();
+      } else {
+        out.println("This tool is meant to migrate tokens into a JDBC TokenStateService backend. However, the currently configured one ("
+            + tokenStateService.getClass().getCanonicalName() + ") does not fulfill this requirement!");
+      }
     }
 
     @Override

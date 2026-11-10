@@ -22,6 +22,14 @@ import org.apache.commons.lang3.tuple.Pair;
 import org.apache.knox.gateway.i18n.messages.MessagesFactory;
 import org.apache.knox.gateway.provider.federation.jwt.JWTMessages;
 import org.apache.knox.gateway.security.PrimaryPrincipal;
+import org.apache.knox.gateway.services.GatewayServices;
+import org.apache.knox.gateway.services.ServiceType;
+import org.apache.knox.gateway.services.knoxidf.delegation.DelegationPolicyService;
+import org.apache.knox.gateway.services.knoxidf.delegation.PolicyCheckRequest;
+import org.apache.knox.gateway.services.knoxidf.delegation.PolicyDecision;
+import org.apache.knox.gateway.services.knoxidf.trustedoidcissuer.IssuerJwksTrust;
+import org.apache.knox.gateway.services.knoxidf.trustedoidcissuer.TrustedOidcIssuerService;
+import org.apache.knox.gateway.services.security.token.TokenUtils;
 import org.apache.knox.gateway.services.security.token.UnknownTokenException;
 import org.apache.knox.gateway.services.security.token.impl.JWT;
 import org.apache.knox.gateway.services.security.token.impl.JWTToken;
@@ -29,33 +37,40 @@ import org.apache.knox.gateway.util.AuthFilterUtils;
 import org.apache.knox.gateway.util.CertificateUtils;
 import org.apache.knox.gateway.util.CookieUtils;
 import org.apache.knox.gateway.util.ServletRequestUtils;
+import org.apache.knox.gateway.util.knoxidf.KnoxIDFConstants;
+import org.apache.knox.gateway.util.knoxidf.KnoxIDFUtils;
 
 import javax.security.auth.Subject;
-import javax.servlet.FilterChain;
-import javax.servlet.FilterConfig;
-import javax.servlet.ServletException;
-import javax.servlet.ServletRequest;
-import javax.servlet.ServletResponse;
-import javax.servlet.http.Cookie;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.FilterConfig;
+import jakarta.servlet.ServletContext;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletResponse;
+import jakarta.servlet.http.Cookie;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.text.ParseException;
 import java.util.Base64;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.Set;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
-import static org.apache.knox.gateway.security.CommonTokenConstants.GRANT_TYPE;
+import static org.apache.knox.gateway.security.CommonTokenConstants.AUTH_CODE;
 import static org.apache.knox.gateway.security.CommonTokenConstants.CLIENT_CREDENTIALS;
 import static org.apache.knox.gateway.security.CommonTokenConstants.CLIENT_ID;
 import static org.apache.knox.gateway.security.CommonTokenConstants.CLIENT_SECRET;
+import static org.apache.knox.gateway.security.CommonTokenConstants.GRANT_TYPE;
+import static org.apache.knox.gateway.security.CommonTokenConstants.TOKEN_EXCHANGE_REQUEST_ATTR;
 import static org.apache.knox.gateway.util.AuthFilterUtils.DEFAULT_AUTH_UNAUTHENTICATED_PATHS_PARAM;
 
 public class JWTFederationFilter extends AbstractJWTFilter {
-
   private static final JWTMessages LOGGER = MessagesFactory.get( JWTMessages.class );
   /* A semicolon separated list of paths that need to bypass authentication */
   public static final String JWT_UNAUTHENTICATED_PATHS_PARAM = "jwt.unauthenticated.path.list";
@@ -66,9 +81,66 @@ public class JWTFederationFilter extends AbstractJWTFilter {
   public static final String CLIENT_ASSERTION_JWT_BEARER = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
   public static final String CLIENT_ASSERTION_TYPE = "client_assertion_type";
   public static final String CLIENT_ASSERTION = "client_assertion";
+  // RFC 8693 constants
+  public static final String TOKEN_EXCHANGE = "urn:ietf:params:oauth:grant-type:token-exchange";
+  public static final String SUBJECT_TOKEN = "subject_token";
+  public static final String ACTOR_TOKEN = "actor_token";
+  public static final String REQUESTED_SUBJECT = "requested_subject";
+  public static final String SUBJECT_TOKEN_TYPE = "subject_token_type";
+  public static final String ACTOR_TOKEN_TYPE = "actor_token_type";
+
+  // RFC 8693 section 3 token type identifiers. Only JWT-family types are supported for exchange;
+  // Knox issues JWT access tokens, so the access_token URN is accepted as an alias for jwt.
+  public static final String TOKEN_TYPE_JWT = "urn:ietf:params:oauth:token-type:jwt";
+  public static final String TOKEN_TYPE_ACCESS_TOKEN = "urn:ietf:params:oauth:token-type:access_token";
+
+  // Topology provider param. OOTB the JWKS URI resolved via dynamic OIDC discovery for a
+  // runtime-registered external issuer MUST be HTTPS: fetching a token issuer's signing keys over
+  // cleartext would let an on-path attacker substitute their own keys and forge subject tokens.
+  // Set this to "true" on the provider to permit an http:// jwks_uri (e.g. an internal test OP).
+  public static final String TOKEN_EXCHANGE_DYNAMIC_JWKS_ALLOW_HTTP = "knox.token.exchange.dynamic.jwks.allow.http";
+
+  // Topology provider param (default false/absent). Master switch for
+  // delegation token-exchange enforcement: while off, every attempted
+  // delegation (any exchange that is not same-subject) is rejected before
+  // DelegationPolicyService.evaluate() is ever called; same-subject
+  // exchanges are never affected by this flag, regardless of its value.
+  // Fail-safe default -- a security control that is off until an operator
+  // explicitly configures a topology to enforce delegation policy.
+  public static final String DELEGATION_SERVER_ENABLED = "delegation.server.enabled";
+
+  // Topology provider param (default false/absent). Gates whether the
+  // requested_subject token-exchange request parameter is read at all.
+  // While off, requested_subject is ignored entirely, exactly as any other
+  // unrecognized parameter.
+  public static final String DELEGATION_REQUESTED_SUBJECT_ENABLED = "delegation.requested.subject.enabled";
+
+  // Topology provider param (default false/absent). Optionally forces that
+  // at least one audience/resource value is present on a delegation
+  // token-exchange request. Has no effect on a same-subject exchange.
+  public static final String DELEGATION_ENFORCE_REQUESTED_AUDIENCE_REQUIRED = "delegation.enforce.requested.audience.required";
+
+  // Topology provider param (default false/absent). Optionally forces that
+  // at most one distinct combined audience/resource value is present on a
+  // delegation token-exchange request; combine with
+  // DELEGATION_ENFORCE_REQUESTED_AUDIENCE_REQUIRED to require exactly one.
+  // Has no effect on a same-subject exchange.
+  public static final String DELEGATION_ENFORCE_REQUESTED_AUDIENCE_MAX_ONE = "delegation.enforce.requested.audience.max.one";
+
+  // Topology provider param (default false/absent). Gates whether a
+  // same-subject token exchange may honor a requested audience/resource at
+  // all. While off (the fail-safe default), the requested audience is ignored
+  // for same-subject exchanges, so a passthrough audience validator cannot
+  // mint an arbitrarily-audienced token without authorization. While on, the
+  // requested audience is honored but must be authorized against the subject
+  // token's own aud claim; any requested value the subject token does not
+  // already carry is rejected. This applies only to same-subject exchanges and
+  // is independent of the delegation.* flags (delegation exchanges are
+  // authorized by the delegation policy regardless of this flag).
+  public static final String TOKEN_EXCHANGE_SAME_SUBJECT_REQUESTED_AUDIENCE_ENABLED = "token.exchange.same.subject.requested.audience.enabled";
 
   public enum TokenType {
-    JWT, Passcode, TokenExchange;
+    JWT, Passcode, TokenExchange, AuthCode;
   }
 
   public static final String KNOX_TOKEN_AUDIENCES = "knox.token.audiences";
@@ -90,14 +162,40 @@ public class JWTFederationFilter extends AbstractJWTFilter {
   private String cookieName;
 
   private String paramName;
+  // OOTB false: a non-HTTPS dynamic-discovery JWKS URI is rejected. Only an explicit
+  // TOKEN_EXCHANGE_DYNAMIC_JWKS_ALLOW_HTTP="true" flips this, so a typo fails safe (secure).
+  private boolean allowInsecureDynamicJwks;
   private Set<String> unAuthenticatedPaths = new HashSet<>(20);
+
+  private DelegationPolicyService delegationPolicyService;
+
+  private boolean delegationServerEnabled;
+  private boolean delegationRequestedSubjectEnabled;
+  private boolean delegationEnforceRequestedAudienceRequired;
+  private boolean delegationEnforceRequestedAudienceMaxOne;
+  private boolean tokenExchangeSameSubjectRequestedAudienceEnabled;
 
   // Handles RFC 8693 token exchange requests (see doFilter).
   private TokenExchangeHandler tokenExchangeHandler = new TokenExchangeHandler(this);
 
+  // Defaults to a validator that reproduces the existing fixed-audience-list
+  // check; overwritten in init() only if RequestAudienceValidatorService's
+  // REQUEST_AUDIENCE_VALIDATOR_PARAM names a discoverable implementation.
+  private RequestAudienceValidator requestAudienceValidator =
+      (request, token, configuredAudiences) -> AudienceValidationResult.of(matchesConfiguredAudiences(token, configuredAudiences));
+
   @Override
   public void init( FilterConfig filterConfig ) throws ServletException {
     super.init(filterConfig);
+
+    // Protect against null ServletContext and GatewayServices on init.
+    final ServletContext context = filterConfig.getServletContext();
+    if (context != null) {
+      final GatewayServices services = (GatewayServices) context.getAttribute(GatewayServices.GATEWAY_SERVICES_ATTRIBUTE);
+      if (services != null) {
+        delegationPolicyService = services.getService(ServiceType.DELEGATION_POLICY_SERVICE);
+      }
+    }
 
     // expected audiences or null
     String expectedAudiences = filterConfig.getInitParameter(KNOX_TOKEN_AUDIENCES);
@@ -136,6 +234,37 @@ public class JWTFederationFilter extends AbstractJWTFilter {
       publicKey = CertificateUtils.parseRSAPublicKey(verificationPEM);
     }
 
+    // Topology toggle for permitting a non-HTTPS dynamic-discovery JWKS URI. Parsed with
+    // Boolean.parseBoolean so anything other than an explicit "true" (including a typo) keeps
+    // HTTPS enforcement on -- the fail-safe direction for a security control.
+    allowInsecureDynamicJwks = Boolean.parseBoolean(
+        filterConfig.getInitParameter(TOKEN_EXCHANGE_DYNAMIC_JWKS_ALLOW_HTTP));
+
+    // Delegation-enforcement topology flags -- see their constant
+    // declarations above for behavior and defaults. Each parsed with
+    // Boolean.parseBoolean so any value other than an explicit "true"
+    // (including absence, or a typo) keeps the flag off -- fail-safe default.
+    delegationServerEnabled = Boolean.parseBoolean(filterConfig.getInitParameter(DELEGATION_SERVER_ENABLED));
+    delegationRequestedSubjectEnabled = Boolean.parseBoolean(filterConfig.getInitParameter(DELEGATION_REQUESTED_SUBJECT_ENABLED));
+    delegationEnforceRequestedAudienceRequired = Boolean.parseBoolean(filterConfig.getInitParameter(DELEGATION_ENFORCE_REQUESTED_AUDIENCE_REQUIRED));
+    delegationEnforceRequestedAudienceMaxOne = Boolean.parseBoolean(filterConfig.getInitParameter(DELEGATION_ENFORCE_REQUESTED_AUDIENCE_MAX_ONE));
+    tokenExchangeSameSubjectRequestedAudienceEnabled = Boolean.parseBoolean(filterConfig.getInitParameter(TOKEN_EXCHANGE_SAME_SUBJECT_REQUESTED_AUDIENCE_ENABLED));
+
+    // Discovers a RequestAudienceValidator by name (see RequestAudienceValidatorService's
+    // REQUEST_AUDIENCE_VALIDATOR_PARAM) for this filter's own direct-bearer JWT path.
+    final RequestAudienceValidatorService requestAudienceValidatorService = new RequestAudienceValidatorService();
+
+    final Optional<RequestAudienceValidator> configuredValidator =
+        requestAudienceValidatorService.getValidator(filterConfig);
+    if (configuredValidator.isPresent()) {
+      requestAudienceValidator = configuredValidator.get();
+      try {
+        requestAudienceValidator.init(filterConfig);
+      } catch (Exception e) {
+        throw new ServletException(e);
+      }
+    }
+
     final String unAuthPathString = filterConfig
         .getInitParameter(JWT_UNAUTHENTICATED_PATHS_PARAM);
     /* prepare a list of allowed unauthenticated paths */
@@ -146,6 +275,11 @@ public class JWTFederationFilter extends AbstractJWTFilter {
 
   @Override
   public void destroy() {
+    try {
+      requestAudienceValidator.destroy();
+    } catch (final RuntimeException e) {
+      LOGGER.failedToDestroyAudienceValidator(e);
+    }
   }
 
   @Override
@@ -173,9 +307,9 @@ public class JWTFederationFilter extends AbstractJWTFilter {
       }
     }
 
-    Pair<TokenType, String> wireToken = null;
+    WireToken wireToken = null;
     try {
-      wireToken = getWireToken(request);
+      wireToken = parseWireToken(request);
     } catch (SecurityException e) {
       handleValidationError((HttpServletRequest) request, (HttpServletResponse) response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
       throw e;
@@ -185,20 +319,42 @@ public class JWTFederationFilter extends AbstractJWTFilter {
     // grant_type is in the request body. The subject_token/actor_token are read from the unwrapped
     // request by the handler. Reading the body only happens on this (header-less) grant-flow path,
     // so a proxied backend's body is never consumed by the header-authenticated path.
-    if (wireToken != null && TokenType.TokenExchange.equals(wireToken.getLeft())) {
+    if (wireToken != null && TokenType.TokenExchange.equals(wireToken.getType())) {
+      // Bind the "this is token exchange" decision to the dispatched path so that only the
+      // subject_token/actor_token validated inside the handler can unlock registered-issuer JWKS.
+      request.setAttribute(TOKEN_EXCHANGE_REQUEST_ATTR, Boolean.TRUE);
       tokenExchangeHandler.handle((HttpServletRequest) request, (HttpServletResponse) response, chain);
       return;
     }
 
-    if (wireToken != null && wireToken.getLeft() != null && wireToken.getRight() != null) {
-      TokenType tokenType  = wireToken.getLeft();
-      String    tokenValue = wireToken.getRight();
+    // authorization_code grant: the KnoxIDF token endpoint (TokenResource) authenticates the client
+    // itself -- a PKCE code_verifier for public clients, or a client_secret for confidential clients
+    // -- and binds the code to its client_id and redirect_uri. getWireToken flags this via
+    // TokenType.AuthCode when the grant_type is in the request body and no Bearer/Basic credentials
+    // were presented. Forward to the service without a gateway-established token so that public PKCE
+    // clients (no secret) are not rejected here.
+    if (wireToken != null && TokenType.AuthCode.equals(wireToken.getType())) {
+      continueWithAuthorizationCodeGrant(request, response, chain);
+      return;
+    }
+
+    if (wireToken != null && wireToken.getType() != null && wireToken.getValue() != null) {
+      TokenType tokenType  = wireToken.getType();
+      String    tokenValue = wireToken.getValue();
 
       if (TokenType.JWT.equals(tokenType)) {
         try {
-          JWT token = parseAndValidateJWT((HttpServletRequest) request, (HttpServletResponse) response, chain, tokenValue);
+          JWT token = parseAndValidateJWT((HttpServletRequest) request, (HttpServletResponse) response, chain, tokenValue, requestAudienceValidator);
           if (token != null) {
-            Subject subject = createSubjectFromToken(token);
+            /* Only a JWT the caller presented as this request's credential will be captured for
+            forwarding downstream. TokenType.JWT also covers refresh_token and client_assertion
+            JWTs read from the request body (see getClientTokenFromParams); those are grant
+            artifacts and must never be echoed by KNOX-AUTH-SERVICE. parseWireToken decided
+            which of the two this is at the point where it read the token. */
+            Subject subject = wireToken.isCallerCredential()
+                ? createSubjectFromCallerToken(token)
+                : createSubjectFromToken(token); // This is where we save the token as private credential
+            addKnoxIDFAttributes(request, token);
             continueWithEstablishedSecurityContext(subject, (HttpServletRequest) request, (HttpServletResponse) response, chain);
           }
         } catch (ParseException | UnknownTokenException ex) {
@@ -220,7 +376,8 @@ public class JWTFederationFilter extends AbstractJWTFilter {
         }
         if (validateToken((HttpServletRequest) request, (HttpServletResponse) response, chain, tokenId, passcode)) {
           try {
-            Subject subject = createSubjectFromTokenIdentifier(tokenId);
+            final Subject subject = createSubjectFromTokenIdentifier(tokenId);
+            request.setAttribute(KnoxIDFConstants.TOKEN_ID_ATTRIBUTE, tokenId);
             continueWithEstablishedSecurityContext(subject, (HttpServletRequest) request, (HttpServletResponse) response, chain);
           } catch (UnknownTokenException e) {
             ((HttpServletResponse) response).sendError(HttpServletResponse.SC_UNAUTHORIZED);
@@ -229,8 +386,20 @@ public class JWTFederationFilter extends AbstractJWTFilter {
       }
     } else {
       // no token provided in header
-      log.missingTokenFromHeader(wireToken);
+      log.missingTokenFromHeader(wireToken == null ? null : wireToken.asPair());
       ((HttpServletResponse) response).sendError(HttpServletResponse.SC_UNAUTHORIZED);
+    }
+  }
+
+  private static void addKnoxIDFAttributes(ServletRequest request, JWT token) {
+    request.setAttribute(KnoxIDFConstants.TOKEN_ID_ATTRIBUTE, TokenUtils.getTokenId(token));
+    final String scope = token.getClaim(KnoxIDFConstants.SCOPE);
+    if (scope != null) {
+      request.setAttribute(KnoxIDFConstants.SCOPE_ATTRIBUTE, scope);
+    }
+    final String issuer = token.getIssuer();
+    if (issuer != null) {
+      request.setAttribute(KnoxIDFConstants.TOKEN_ISS_ATTRIBUTE, issuer);
     }
   }
 
@@ -257,42 +426,118 @@ public class JWTFederationFilter extends AbstractJWTFilter {
     return new String(Base64.getDecoder().decode(toBeDecoded.getBytes(UTF_8)), UTF_8);
   }
 
+  /**
+   * A token read off the wire, together with <em>where it was read from</em>. Provenance is decided
+   * by {@link JWTFederationFilter#parseWireToken(ServletRequest)} at the point it reads the token,
+   * rather than re-derived afterwards from the shape of the request: the presence of an
+   * {@code Authorization} header does not mean the token came from it, because
+   * {@link JWTFederationFilter#parseFromHTTPBasicCredentials(String, ServletRequest)} can decline a
+   * credential-shaped header and leave the token to be read from a grant-flow body parameter.
+   */
+  static final class WireToken {
+    private final TokenType type;
+    private final String value;
+    private final boolean callerCredential;
+
+    private WireToken(final TokenType type, final String value, final boolean callerCredential) {
+      this.type = type;
+      this.value = value;
+      this.callerCredential = callerCredential;
+    }
+
+    /**
+     * A token the caller presented as this request's own credential: an {@code Authorization}
+     * header, or the configured token query parameter. Only these may be captured for forwarding
+     * downstream.
+     */
+    static WireToken callerCredential(final TokenType type, final String value) {
+      return new WireToken(type, value, true);
+    }
+
+    /**
+     * A token presented as a grant-flow artifact -- a {@code refresh_token}, a
+     * {@code client_assertion} or an RFC 8693 {@code subject_token}. It is used to mint a new
+     * token, not to authenticate this request, so it must never be echoed downstream.
+     */
+    static WireToken grantArtifact(final TokenType type, final String value) {
+      return new WireToken(type, value, false);
+    }
+
+    TokenType getType() {
+      return type;
+    }
+
+    String getValue() {
+      return value;
+    }
+
+    boolean isCallerCredential() {
+      return callerCredential;
+    }
+
+    Pair<TokenType, String> asPair() {
+      return Pair.of(type, value);
+    }
+  }
+
+  /**
+   * Recognizes the {@code Authorization} header forms that may carry the caller's own credential.
+   * A header recognized here is only a candidate: {@link #parseFromHTTPBasicCredentials(String,
+   * ServletRequest)} may still decline it, in which case the token is read from elsewhere and is
+   * not the caller's credential. That is why provenance is recorded by the parse and not inferred
+   * from this predicate.
+   */
+  private static boolean isCallerCredentialHeader(final String header) {
+    return header != null
+        && (header.startsWith(BEARER) || header.toLowerCase(Locale.ROOT).startsWith(BASIC.toLowerCase(Locale.ROOT)));
+  }
+
   public Pair<TokenType, String> getWireToken(final ServletRequest request) throws IOException {
-      Pair<TokenType, String> parsed = null;
-      String token = null;
+    final WireToken wireToken = parseWireToken(request);
+    return wireToken == null ? null : wireToken.asPair();
+  }
+
+  /**
+   * Reads this request's token and records whether the caller presented it as their own credential.
+   *
+   * @param request the request to read
+   * @return the token and its provenance, or {@code null} when the request carries no token
+   * @throws IOException if the request body cannot be read
+   */
+  WireToken parseWireToken(final ServletRequest request) throws IOException {
       final String header = ((HttpServletRequest)request).getHeader("Authorization");
-      if (header != null) {
+      if (isCallerCredentialHeader(header)) {
           if (header.startsWith(BEARER)) {
               // what follows the bearer designator should be the JWT token being used
               // to request or as an access token
-              token = header.substring(BEARER.length());
+              final String token = header.substring(BEARER.length());
 
               // if this appears to be a JWT token then attempt to use it as such
               // otherwise assume it is a passcode token
-              if (isJWT(token)) {
-                parsed = Pair.of(TokenType.JWT, token);
-              } else {
-                parsed = Pair.of(TokenType.Passcode, token);
-              }
-          } else if (header.toLowerCase(Locale.ROOT).startsWith(BASIC.toLowerCase(Locale.ROOT))) {
+              return WireToken.callerCredential(isJWT(token) ? TokenType.JWT : TokenType.Passcode, token);
+          } else {
               // what follows the Basic designator should be the JWT token or the unique token ID being used
               // to request or as an access token
-              parsed = parseFromHTTPBasicCredentials(header, request);
+              final Pair<TokenType, String> basic = parseFromHTTPBasicCredentials(header, request);
+              if (basic != null) {
+                return WireToken.callerCredential(basic.getLeft(), basic.getRight());
+              }
+              // The header was credential-shaped but carried no token we recognize, so fall through.
+              // Anything found below did NOT come from this header and is not the caller's credential.
           }
       }
 
-      if (parsed == null) {
-        parsed = parseFromGrantTypeFlow(request);
+      final Pair<TokenType, String> grantFlow = parseFromGrantTypeFlow(request);
+      if (grantFlow != null) {
+        return WireToken.grantArtifact(grantFlow.getLeft(), grantFlow.getRight());
       }
 
-      if (parsed == null) {
-        token = request.getParameter(this.paramName);
-        if (token != null) {
-          parsed = Pair.of(TokenType.JWT, token);
-        }
+      final String queryParamToken = request.getParameter(this.paramName);
+      if (queryParamToken != null) {
+        return WireToken.callerCredential(TokenType.JWT, queryParamToken);
       }
 
-      return parsed;
+      return null;
     }
 
     private Pair<TokenType, String> parseFromGrantTypeFlow(ServletRequest request) throws IOException {
@@ -332,8 +577,12 @@ public class JWTFederationFilter extends AbstractJWTFilter {
         HttpServletRequest unwrappedRequest = ServletRequestUtils.unwrapHttpServletRequest(request);
         final String grantType = unwrappedRequest.getParameter(GRANT_TYPE);
         final String clientAssertionType = unwrappedRequest.getParameter(CLIENT_ASSERTION_TYPE);
-        if (CLIENT_CREDENTIALS.equals(grantType)) {
-          if (clientAssertionType != null && CLIENT_ASSERTION_JWT_BEARER.equals(clientAssertionType)) {
+        if (AUTH_CODE.equals(grantType)) {
+          // no client_secret parsed here; the KnoxIDF token endpoint authenticates the client
+          // (see the TokenType.AuthCode handling in doFilter)
+          return Pair.of(TokenType.AuthCode, null);
+        } else if (CLIENT_CREDENTIALS.equals(grantType)) {
+          if (CLIENT_ASSERTION_JWT_BEARER.equals(clientAssertionType)) {
             // short lived client assertion token expected
             return getClientTokenFromParams(unwrappedRequest, CLIENT_ASSERTION);
           }
@@ -345,7 +594,7 @@ public class JWTFederationFilter extends AbstractJWTFilter {
         } else if (REFRESH_TOKEN.equals(grantType)) {
           // refresh_token flow: the refresh_token parameter contains the actual token
           return getClientTokenFromParams(unwrappedRequest, REFRESH_TOKEN_PARAM);
-        } else if (TokenExchangeHandler.TOKEN_EXCHANGE.equals(grantType)) {
+        } else if (TOKEN_EXCHANGE.equals(grantType)) {
           // RFC 8693 token exchange: signal it via the token type. doFilter routes this to
           // TokenExchangeHandler, which reads subject_token/actor_token from the unwrapped request.
           return Pair.of(TokenType.TokenExchange, null);
@@ -394,9 +643,10 @@ public class JWTFederationFilter extends AbstractJWTFilter {
     final List<Cookie> relevantCookies = CookieUtils.getCookiesForName(request, cookieName);
     for (Cookie ssoCookie : relevantCookies) {
       try {
-        final JWT token = parseAndValidateJWT(request, response, chain, ssoCookie.getValue());
+        final JWT token = parseAndValidateCookieJWT(request, response, chain, ssoCookie.getValue());
         if (token != null) {
-          final Subject subject = createSubjectFromToken(token);
+          // A KnoxSSO cookie is the credential the caller authenticated with, so it is forwardable
+          final Subject subject = createSubjectFromCallerToken(token);
           continueWithEstablishedSecurityContext(subject, request, response, chain);
           // we found a valid cookie we don't need to keep checking anymore
           return true;
@@ -417,7 +667,9 @@ public class JWTFederationFilter extends AbstractJWTFilter {
   }
 
   /**
-   * Parse and validate a JWT token.
+   * Parse and validate a JWT token with the default request audience validator.
+   *
+   * The default audience validator matches the configured list of allowed audiences.
    *
    * @param request the HTTP request
    * @param response the HTTP response
@@ -428,12 +680,58 @@ public class JWTFederationFilter extends AbstractJWTFilter {
    * @throws IOException if an I/O error occurs during validation
    * @throws ServletException if a servlet error occurs during validation
    */
-  // package-private: also invoked by TokenExchangeHandler
   JWT parseAndValidateJWT(HttpServletRequest request, HttpServletResponse response,
                                   FilterChain chain, String tokenValue)
       throws ParseException, IOException, ServletException {
+    return parseAndValidateJWT(request, response, chain, tokenValue, requestAudienceValidator);
+  }
+
+  /**
+   * Parse and validate a JWT presented in a cookie (e.g. {@code hadoop-jwt}).
+   *
+   * <p>Identical to {@link #parseAndValidateJWT(HttpServletRequest, HttpServletResponse,
+   * FilterChain, String)} except that the token is flagged as cookie-borne, which is what makes it
+   * eligible for {@link AbstractJWTFilter#ALLOW_UNKNOWN_COOKIE_TOKEN_STATE}. The
+   * {@code Authorization} header, HTTP Basic, passcode and token-exchange paths deliberately keep
+   * the stricter default.
+   */
+  JWT parseAndValidateCookieJWT(HttpServletRequest request, HttpServletResponse response,
+                                FilterChain chain, String tokenValue)
+          throws ParseException, IOException, ServletException {
+    return parseAndValidateJWT(request, response, chain, tokenValue, requestAudienceValidator, true);
+  }
+
+
+  /**
+   * Parse and validate a JWT token.
+   * @param request the HTTP request
+   * @param response the HTTP response
+   * @param chain the filter chain
+   * @param tokenValue the JWT string to parse
+   * @param requestAudienceValidator the RequestAudienceValidator to use for aud claim validation
+   * @return the parsed and validated JWT, or null if validation failed
+   * @throws ParseException if the JWT cannot be parsed
+   * @throws IOException if an I/O error occurs during validation
+   * @throws ServletException if a servlet error occurs during validation
+   */
+  JWT parseAndValidateJWT(HttpServletRequest request, HttpServletResponse response,
+                                  FilterChain chain, String tokenValue,
+                                  RequestAudienceValidator requestAudienceValidator)
+      throws ParseException, IOException, ServletException {
+    return parseAndValidateJWT(request, response, chain, tokenValue, requestAudienceValidator, false);
+  }
+
+  /**
+   * @param cookieAuth true when {@code tokenValue} came from a cookie; see
+   *     {@link AbstractJWTFilter#ALLOW_UNKNOWN_COOKIE_TOKEN_STATE}.
+   */
+  JWT parseAndValidateJWT(HttpServletRequest request, HttpServletResponse response,
+                                  FilterChain chain, String tokenValue,
+                                  RequestAudienceValidator requestAudienceValidator,
+                                  boolean cookieAuth)
+      throws ParseException, IOException, ServletException {
     JWT token = new JWTToken(tokenValue);
-    if (validateToken(request, response, chain, token)) {
+    if (validateToken(request, response, chain, token, requestAudienceValidator, cookieAuth)) {
       return token;
     }
     // Validation failed - error response already sent by validateToken
@@ -441,14 +739,79 @@ public class JWTFederationFilter extends AbstractJWTFilter {
   }
 
   @Override
+  protected RegisteredIssuerJwks resolveRegisteredIssuerJwks(String issuer, HttpServletRequest request) {
+    // Only a genuine token-exchange dispatch (see doFilter) may trust a runtime-registered external
+    // issuer's JWKS. Reading the request attribute -- not getParameter(GRANT_TYPE) -- prevents a
+    // ?grant_type=<token-exchange> query param on a plain Bearer request from unlocking this path.
+    if (!Boolean.TRUE.equals(request.getAttribute(TOKEN_EXCHANGE_REQUEST_ATTR))) {
+      return RegisteredIssuerJwks.EMPTY;
+    }
+    final GatewayServices gws = (GatewayServices)
+        request.getServletContext().getAttribute(GatewayServices.GATEWAY_SERVICES_ATTRIBUTE);
+    if (gws != null) {
+      final TrustedOidcIssuerService issuerSvc = gws.getService(ServiceType.TRUSTED_OIDC_ISSUER_SERVICE);
+      // isDynamicJwks() is the combined guard: true only if the issuer is both registered as
+      // trusted AND configured for dynamic JWKS discovery. If the issuer is not registered, or
+      // registered without dynamic JWKS, it is not actionable through this path.
+      if (issuerSvc != null && issuerSvc.isDynamicJwks(issuer)) {
+        // resolveJwksUri() performs (cached) OIDC discovery. The discovery fetch honors the issuer's
+        // jwksCa without it being passed in: the discovery helper looks up the same trust through
+        // getJwksTrust() and fetches with a short-lived client trusting only that CA bundle.
+        final Optional<String> jwksUri = issuerSvc.resolveJwksUri(issuer);
+        if (jwksUri.isPresent()) {
+          try {
+            final URI uri = new URI(jwksUri.get());
+            // OOTB the discovered JWKS URI must be HTTPS (see TOKEN_EXCHANGE_DYNAMIC_JWKS_ALLOW_HTTP):
+            // signing keys fetched over cleartext could be swapped by an on-path attacker to forge
+            // subject tokens. Reject anything non-HTTPS unless the operator opted in.
+            if (!allowInsecureDynamicJwks && !"https".equalsIgnoreCase(uri.getScheme())) {
+              LOGGER.rejectedInsecureDynamicJwksUri(jwksUri.get(), issuer);
+              return RegisteredIssuerJwks.EMPTY;
+            }
+            // The JWKS fetch, done later by the token authority, gets the trust passed along with the
+            // URI, so an issuer registered with a jwksCa is fetched trusting only that CA bundle. If
+            // the bundle cannot be loaded, reject rather than fall back to the default truststore.
+            final IssuerJwksTrust jwksTrust;
+            try {
+              jwksTrust = issuerSvc.getJwksTrust(issuer).orElse(null);
+            } catch (IllegalStateException e) {
+              LOGGER.rejectedIssuerWithUnavailableJwksCa(issuer, e.getMessage());
+              return RegisteredIssuerJwks.EMPTY;
+            }
+            return new RegisteredIssuerJwks(Set.of(uri), jwksTrust);
+          } catch (URISyntaxException e) {
+            LOGGER.unableToVerifyToken(e);
+          }
+        }
+      }
+    }
+    return RegisteredIssuerJwks.EMPTY;
+  }
+
+  @Override
   protected void handleValidationError(HttpServletRequest request, HttpServletResponse response, int status,
                                        String error) throws IOException {
+    if (Boolean.TRUE.equals(request.getAttribute(TOKEN_EXCHANGE_REQUEST_ATTR))) {
+      handleValidationError(request, response, status, "invalid_request", error);
+      return;
+    }
     if (error != null) {
       response.sendError(status, error);
     }
     else {
       response.sendError(status);
     }
+  }
+
+  /**
+   * Emit an RFC 8693 / RFC 6749 §5.2 JSON error response ({@code {"error": ..., "error_description":
+   * ...}}) for a token-exchange request. Called directly by {@link TokenExchangeHandler} when it has
+   * an explicit OAuth error code (e.g. {@code invalid_request}), and indirectly by the four-argument
+   * {@link #handleValidationError} for shared-path errors.
+   */
+  void handleValidationError(HttpServletRequest request, HttpServletResponse response, int status,
+                             String error, String description) throws IOException {
+    KnoxIDFUtils.writeErrorResponse(response, status, error, description);
   }
 
   /**
@@ -480,6 +843,22 @@ public class JWTFederationFilter extends AbstractJWTFilter {
   }
 
   /**
+   * Forwards an {@code authorization_code} token request to the KnoxIDF token endpoint without a
+   * gateway-established token. The token endpoint ({@code TokenResource.validateAuthCode})
+   * independently authenticates the client -- a PKCE {@code code_verifier} for public clients, or a
+   * {@code client_secret} for confidential clients -- and binds the code to its {@code client_id}
+   * and {@code redirect_uri}, so this filter only needs to let the request through with an anonymous
+   * subject. The principal of the issued token is derived from the authorization code's stored
+   * metadata, not from this subject.
+   */
+  private void continueWithAuthorizationCodeGrant(final ServletRequest request, final ServletResponse response, final FilterChain chain)
+      throws ServletException, IOException {
+    final Subject subject = new Subject();
+    subject.getPrincipals().add(new PrimaryPrincipal("anonymous"));
+    continueWithEstablishedSecurityContext(subject, (HttpServletRequest) request, (HttpServletResponse) response, chain);
+  }
+
+  /**
    * An exception indicating that cookies are present, but none of them contain a
    * valid JWT.
    */
@@ -492,5 +871,29 @@ public class JWTFederationFilter extends AbstractJWTFilter {
   // Test seam: allows a mock/recording handler to be injected.
   void setTokenExchangeHandler(TokenExchangeHandler tokenExchangeHandler) {
     this.tokenExchangeHandler = tokenExchangeHandler;
+  }
+
+  boolean isDelegationServerEnabled() {
+    return delegationServerEnabled;
+  }
+
+  boolean isDelegationRequestedSubjectEnabled() {
+    return delegationRequestedSubjectEnabled;
+  }
+
+  boolean isDelegationEnforceRequestedAudienceRequired() {
+    return delegationEnforceRequestedAudienceRequired;
+  }
+
+  boolean isDelegationEnforceRequestedAudienceMaxOne() {
+    return delegationEnforceRequestedAudienceMaxOne;
+  }
+
+  boolean isTokenExchangeSameSubjectRequestedAudienceEnabled() {
+    return tokenExchangeSameSubjectRequestedAudienceEnabled;
+  }
+
+  PolicyDecision evaluateDelegationPolicy(PolicyCheckRequest request) {
+    return delegationPolicyService.evaluate(request);
   }
 }

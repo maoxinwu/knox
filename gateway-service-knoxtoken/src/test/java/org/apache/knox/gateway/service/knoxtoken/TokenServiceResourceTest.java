@@ -22,6 +22,7 @@ import static org.apache.knox.gateway.config.impl.GatewayConfigImpl.KNOX_TOKEN_U
 import static org.apache.knox.gateway.service.knoxtoken.TokenResource.KNOX_TOKEN_ISSUER;
 import static org.apache.knox.gateway.service.knoxtoken.TokenResource.KNOX_TOKEN_USER_LIMIT_EXCEEDED_ACTION;
 import static org.apache.knox.gateway.service.knoxtoken.TokenResource.KNOX_TOKEN_USER_LIMIT_PER_USER;
+import static org.apache.knox.gateway.service.knoxtoken.TokenResource.KNOX_TOKEN_USER_LIMIT_PER_USER_BY_TYPE_ENABLED;
 import static org.apache.knox.gateway.service.knoxtoken.TokenResource.TOKEN_INCLUDE_GROUPS_IN_JWT_ALLOWED;
 import static org.apache.knox.gateway.services.security.token.JWTokenAttributes.DEFAULT_ISSUER;
 import static org.apache.knox.gateway.services.security.token.impl.JWTToken.KNOX_GROUPS_CLAIM;
@@ -59,6 +60,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TimeZone;
 import java.util.TreeSet;
+import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -66,13 +68,13 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.function.Predicate;
 import javax.security.auth.Subject;
-import javax.servlet.ServletContext;
-import javax.servlet.ServletException;
-import javax.servlet.http.HttpServletRequest;
-import javax.ws.rs.core.MultivaluedHashMap;
-import javax.ws.rs.core.MultivaluedMap;
-import javax.ws.rs.core.Response;
-import javax.ws.rs.core.UriInfo;
+import jakarta.servlet.ServletContext;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.ws.rs.core.MultivaluedHashMap;
+import jakarta.ws.rs.core.MultivaluedMap;
+import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -87,8 +89,14 @@ import com.nimbusds.jose.proc.SecurityContext;
 import de.thetaphi.forbiddenapis.SuppressForbidden;
 import org.apache.commons.codec.digest.HmacAlgorithms;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.knox.gateway.audit.api.Action;
+import org.apache.knox.gateway.audit.api.ActionOutcome;
+import org.apache.knox.gateway.audit.api.Auditor;
+import org.apache.knox.gateway.audit.api.ResourceType;
 import org.apache.knox.gateway.config.GatewayConfig;
 import org.apache.knox.gateway.context.ContextAttributes;
+import org.apache.knox.gateway.security.ActorChainPrincipalImpl;
+import org.apache.knox.gateway.security.CommonTokenConstants;
 import org.apache.knox.gateway.security.GroupPrincipal;
 import org.apache.knox.gateway.security.ImpersonatedPrincipal;
 import org.apache.knox.gateway.security.PrimaryPrincipal;
@@ -101,7 +109,9 @@ import org.apache.knox.gateway.services.security.token.JWTokenAttributes;
 import org.apache.knox.gateway.services.security.token.JWTokenAuthority;
 import org.apache.knox.gateway.services.security.token.KnoxToken;
 import org.apache.knox.gateway.services.security.token.PersistentTokenStateService;
+import org.apache.knox.gateway.services.security.token.TokenAlreadyExistsException;
 import org.apache.knox.gateway.services.security.token.TokenMetadata;
+import org.apache.knox.gateway.services.security.token.TokenMetadataType;
 import org.apache.knox.gateway.services.security.token.TokenServiceException;
 import org.apache.knox.gateway.services.security.token.TokenStateService;
 import org.apache.knox.gateway.services.security.token.TokenUtils;
@@ -112,7 +122,9 @@ import org.apache.knox.gateway.services.security.token.impl.TokenMAC;
 import org.apache.knox.gateway.services.token.impl.JDBCTokenStateService;
 import org.apache.knox.gateway.util.AuthFilterUtils;
 import org.apache.knox.gateway.util.JsonUtils;
+import org.easymock.Capture;
 import org.easymock.EasyMock;
+import org.junit.After;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -132,13 +144,22 @@ public class TokenServiceResourceTest {
 
   private ServletContext context;
   private HttpServletRequest request;
+  private String clientIdParamValue;
+  private String[] resourceParamValues;
+  private List<String> exchangeRequestedAudiences;
+  private Integer exchangeRequestedTtlSec;
+  private Boolean tokenExchangeRequestOriginated;
+  private static final Auditor ORIGINAL_AUDITOR = TokenResource.auditor;
   private JWTokenAuthority authority;
   private TestTokenStateService tss = new TestTokenStateService();
   private char[] hmacSecret;
+  private final Set<String> usersCanSeeAllTokens = new HashSet<>();
 
   private enum TokenLifecycleOperation {
     Renew,
-    Revoke
+    Revoke,
+    Enable,
+    Disable
   }
 
   @BeforeClass
@@ -149,6 +170,13 @@ public class TokenServiceResourceTest {
 
     publicKey = (RSAPublicKey) KPair.getPublic();
     privateKey = (RSAPrivateKey) KPair.getPrivate();
+  }
+
+  @After
+  public void cleanUp() {
+    this.usersCanSeeAllTokens.clear();
+    this.clientIdParamValue = null;
+    TokenResource.auditor = ORIGINAL_AUDITOR;
   }
 
   private void configureCommonExpectations(Map<String, String> contextExpectations) throws Exception {
@@ -188,7 +216,26 @@ public class TokenServiceResourceTest {
     if (contextExpectations.containsKey(TokenResource.QUERY_PARAMETER_DOAS)) {
       EasyMock.expect(request.getParameter(TokenResource.QUERY_PARAMETER_DOAS)).andReturn(contextExpectations.get(TokenResource.QUERY_PARAMETER_DOAS)).anyTimes();
     }
+    // The client-credentials clientId query param (null unless a test opts a value in).
+    EasyMock.expect(request.getParameter("clientId")).andReturn(clientIdParamValue).anyTimes();
     EasyMock.expect(request.getParameterNames()).andReturn(Collections.emptyEnumeration()).anyTimes();
+    final Map<String, String[]> parameterMap = new HashMap<>();
+    if (resourceParamValues != null) {
+      parameterMap.put(TokenResource.RESOURCE_QUERY_PARAM, resourceParamValues);
+    }
+    EasyMock.expect(request.getParameterMap()).andReturn(parameterMap).anyTimes();
+    if (exchangeRequestedAudiences != null) {
+      EasyMock.expect(request.getAttribute(CommonTokenConstants.REQUESTED_AUDIENCES_REQUEST_ATTR))
+          .andReturn(exchangeRequestedAudiences).anyTimes();
+    }
+    if (exchangeRequestedTtlSec != null) {
+      EasyMock.expect(request.getAttribute(CommonTokenConstants.REQUESTED_TTL_REQUEST_ATTR))
+          .andReturn(exchangeRequestedTtlSec).anyTimes();
+    }
+    if (Boolean.TRUE.equals(tokenExchangeRequestOriginated)) {
+      EasyMock.expect(request.getAttribute(CommonTokenConstants.TOKEN_EXCHANGE_REQUEST_ATTR))
+          .andReturn(Boolean.TRUE).anyTimes();
+    }
 
     GatewayServices services = EasyMock.createNiceMock(GatewayServices.class);
     EasyMock.expect(context.getAttribute(GatewayServices.GATEWAY_SERVICES_ATTRIBUTE)).andReturn(services).anyTimes();
@@ -206,6 +253,8 @@ public class TokenServiceResourceTest {
       EasyMock.expect(config.getServiceParameter(tokenStateServiceType, "impl")).andReturn(contextExpectations.get(tokenStateServiceType)).anyTimes();
     }
     EasyMock.expect(config.getKnoxTokenHashAlgorithm()).andReturn(HmacAlgorithms.HMAC_SHA_256.getName()).anyTimes();
+    EasyMock.expect(config.canSeeAllTokens(EasyMock.anyObject(String.class)))
+        .andAnswer(() -> usersCanSeeAllTokens.contains((String) EasyMock.getCurrentArguments()[0])).anyTimes();
     EasyMock.expect(config.getMaximumNumberOfTokensPerUser())
         .andReturn(contextExpectations.containsKey(KNOX_TOKEN_USER_LIMIT) ? Integer.parseInt(contextExpectations.get(KNOX_TOKEN_USER_LIMIT)) : -1).anyTimes();
     EasyMock.expect(services.getService(ServiceType.TOKEN_STATE_SERVICE)).andReturn(tss).anyTimes();
@@ -225,11 +274,11 @@ public class TokenServiceResourceTest {
       ArrayList<X509Certificate> certArrayList = new ArrayList<>();
       certArrayList.add(trustedCertMock);
       X509Certificate[] certs = {};
-      EasyMock.expect(request.getAttribute("javax.servlet.request.X509Certificate")).andReturn(certArrayList.toArray(certs)).anyTimes();
+      EasyMock.expect(request.getAttribute("jakarta.servlet.request.X509Certificate")).andReturn(certArrayList.toArray(certs)).anyTimes();
       EasyMock.replay(trustedCertMock);
     }
     else {
-      EasyMock.expect(request.getAttribute("javax.servlet.request.X509Certificate")).andReturn(null).anyTimes();
+      EasyMock.expect(request.getAttribute("jakarta.servlet.request.X509Certificate")).andReturn(null).anyTimes();
     }
 
     EasyMock.replay(principal, services, context, request, aliasService, config);
@@ -417,6 +466,311 @@ public class TokenServiceResourceTest {
     assertEquals(2, audiences.size());
     assertTrue(audiences.contains("recipient1"));
     assertTrue(audiences.contains("recipient2"));
+  }
+
+  @Test
+  public void testDynamicResourceNoParamUsesConfigured() throws Exception {
+    final Map<String, String> contextExpectations = new HashMap<>();
+    contextExpectations.put("knox.token.audience.validator", "whitelist");
+    contextExpectations.put("knox.token.audiences", "recipient1,recipient2");
+    configureCommonExpectations(contextExpectations);
+
+    TokenResource tr = new TokenResource();
+    tr.request = request;
+    tr.context = context;
+    tr.init();
+
+    Response retResponse = tr.doGet();
+    assertEquals(200, retResponse.getStatus());
+
+    JWT parsedToken = new JWTToken(getTagValue(retResponse.getEntity().toString(), "access_token"));
+    List<String> audiences = Arrays.asList(parsedToken.getAudienceClaims());
+    assertEquals(2, audiences.size());
+    assertTrue(audiences.contains("recipient1"));
+    assertTrue(audiences.contains("recipient2"));
+  }
+
+  @Test
+  public void testDynamicResourceIgnoredWithDefaultStaticValidator() throws Exception {
+    // With no validator configured the default 'static' validator is used: a requested resource must
+    // be ignored and the configured audiences used unchanged (historical behavior).
+    resourceParamValues = new String[] { "https://recipient1" };
+    final Map<String, String> contextExpectations = new HashMap<>();
+    contextExpectations.put("knox.token.audiences", "recipient1,recipient2");
+    configureCommonExpectations(contextExpectations);
+
+    TokenResource tr = new TokenResource();
+    tr.request = request;
+    tr.context = context;
+    tr.init();
+
+    Response retResponse = tr.doGet();
+    assertEquals(200, retResponse.getStatus());
+
+    JWT parsedToken = new JWTToken(getTagValue(retResponse.getEntity().toString(), "access_token"));
+    List<String> audiences = Arrays.asList(parsedToken.getAudienceClaims());
+    assertEquals(2, audiences.size());
+    assertTrue(audiences.contains("recipient1"));
+    assertTrue(audiences.contains("recipient2"));
+  }
+
+  @Test(expected = ServiceLifecycleException.class)
+  public void testDeploymentFailsWhenWhitelistValidatorWithoutWhitelist() throws Exception {
+    // Selecting the whitelist validator with no configured audiences must fail the deployment rather
+    // than start up unable to honor any request.
+    final Map<String, String> contextExpectations = new HashMap<>();
+    contextExpectations.put("knox.token.audience.validator", "whitelist");
+    configureCommonExpectations(contextExpectations);
+
+    TokenResource tr = new TokenResource();
+    tr.request = request;
+    tr.context = context;
+    tr.init();
+  }
+
+  @Test(expected = ServiceLifecycleException.class)
+  public void testDeploymentFailsWhenUnknownAudienceValidatorConfigured() throws Exception {
+    final Map<String, String> contextExpectations = new HashMap<>();
+    contextExpectations.put("knox.token.audiences", "recipient1");
+    contextExpectations.put("knox.token.audience.validator", "does-not-exist");
+    configureCommonExpectations(contextExpectations);
+
+    TokenResource tr = new TokenResource();
+    tr.request = request;
+    tr.context = context;
+    tr.init();
+  }
+
+  @Test
+  public void testDynamicResourceAllowedWhenWhitelisted() throws Exception {
+    resourceParamValues = new String[] { "https://recipient1" };
+    final Map<String, String> contextExpectations = new HashMap<>();
+    contextExpectations.put("knox.token.audience.validator", "whitelist");
+    contextExpectations.put("knox.token.audiences", "https://recipient1,https://recipient2");
+    configureCommonExpectations(contextExpectations);
+
+    TokenResource tr = new TokenResource();
+    tr.request = request;
+    tr.context = context;
+    tr.init();
+
+    Response retResponse = tr.doGet();
+    assertEquals(200, retResponse.getStatus());
+
+    JWT parsedToken = new JWTToken(getTagValue(retResponse.getEntity().toString(), "access_token"));
+    List<String> audiences = Arrays.asList(parsedToken.getAudienceClaims());
+    assertEquals(1, audiences.size());
+    assertTrue(audiences.contains("https://recipient1"));
+    assertFalse(audiences.contains("https://recipient2"));
+  }
+
+  @Test
+  public void testExchangeRequestedAudiencesFromRequestAttributeAreHonored() throws Exception {
+    // An RFC 8693 token-exchange request conveys its already-validated resource/audience via a
+    // request attribute (set by the JWTProvider's TokenExchangeHandler). The audience value is a
+    // logical name and reaches the aud claim through the passthrough validator.
+    exchangeRequestedAudiences = Arrays.asList("https://recipient1", "service-a");
+    final Map<String, String> contextExpectations = new HashMap<>();
+    contextExpectations.put("knox.token.audience.validator", "passthrough");
+    configureCommonExpectations(contextExpectations);
+
+    TokenResource tr = new TokenResource();
+    tr.request = request;
+    tr.context = context;
+    tr.init();
+
+    Response retResponse = tr.doGet();
+    assertEquals(200, retResponse.getStatus());
+
+    JWT parsedToken = new JWTToken(getTagValue(retResponse.getEntity().toString(), "access_token"));
+    List<String> audiences = Arrays.asList(parsedToken.getAudienceClaims());
+    assertEquals(2, audiences.size());
+    assertTrue(audiences.contains("https://recipient1"));
+    assertTrue(audiences.contains("service-a"));
+  }
+
+  @Test
+  public void testExchangeOriginatedMintEmitsTokenExchangeAudit() throws Exception {
+    // KNOX-3460: a mint that the token-exchange path marked as exchange-originated must emit a
+    // mint-time TOKEN_EXCHANGE audit carrying the fields only known post-mint: jti, expiry, and
+    // issued subject. This record correlates with the pre-mint decision the exchange handler audited.
+    tokenExchangeRequestOriginated = true;
+    final Map<String, String> contextExpectations = new HashMap<>();
+    configureCommonExpectations(contextExpectations);
+
+    final Auditor auditor = EasyMock.createMock(Auditor.class);
+    final Capture<String> message = EasyMock.newCapture();
+    auditor.audit(EasyMock.eq(Action.TOKEN_EXCHANGE), EasyMock.eq(USER_NAME),
+        EasyMock.eq(ResourceType.PRINCIPAL), EasyMock.eq(ActionOutcome.SUCCESS),
+        EasyMock.capture(message));
+    EasyMock.expectLastCall().once();
+    EasyMock.replay(auditor);
+    TokenResource.auditor = auditor;
+
+    TokenResource tr = new TokenResource();
+    tr.request = request;
+    tr.context = context;
+    tr.init();
+
+    Response retResponse = tr.doGet();
+    assertEquals(200, retResponse.getStatus());
+
+    JWT parsedToken = new JWTToken(getTagValue(retResponse.getEntity().toString(), "access_token"));
+    EasyMock.verify(auditor);
+    assertTrue(message.getValue().contains("event_type=token_exchange_minted"));
+    assertTrue(message.getValue().contains("issued_token_jti=" + TokenUtils.getTokenId(parsedToken)));
+    assertTrue(message.getValue().contains("issued_token_expiry="));
+    assertTrue(message.getValue().contains("issued_subject=" + USER_NAME));
+  }
+
+  @Test
+  public void testOrdinaryIssuanceEmitsNoTokenExchangeAudit() throws Exception {
+    // Ordinary (non-exchange) token issuance carries no exchange marker and must NOT emit any
+    // TOKEN_EXCHANGE mint audit -- explicitly out of scope for KNOX-3460. The strict mock has no
+    // expectations, so any audit() call fails the test.
+    final Map<String, String> contextExpectations = new HashMap<>();
+    configureCommonExpectations(contextExpectations);
+
+    final Auditor auditor = EasyMock.createMock(Auditor.class);
+    EasyMock.replay(auditor);
+    TokenResource.auditor = auditor;
+
+    TokenResource tr = new TokenResource();
+    tr.request = request;
+    tr.context = context;
+    tr.init();
+
+    Response retResponse = tr.doGet();
+    assertEquals(200, retResponse.getStatus());
+    EasyMock.verify(auditor);
+  }
+
+  @Test
+  public void testExchangeRequestedAudiencesTakePrecedenceOverQueryParam() throws Exception {
+    // When the token-exchange body value is present it takes precedence over the resource query
+    // parameter, which must be ignored entirely.
+    exchangeRequestedAudiences = Arrays.asList("https://from-body");
+    resourceParamValues = new String[] { "https://from-query" };
+    final Map<String, String> contextExpectations = new HashMap<>();
+    contextExpectations.put("knox.token.audience.validator", "passthrough");
+    configureCommonExpectations(contextExpectations);
+
+    TokenResource tr = new TokenResource();
+    tr.request = request;
+    tr.context = context;
+    tr.init();
+
+    Response retResponse = tr.doGet();
+    assertEquals(200, retResponse.getStatus());
+
+    JWT parsedToken = new JWTToken(getTagValue(retResponse.getEntity().toString(), "access_token"));
+    List<String> audiences = Arrays.asList(parsedToken.getAudienceClaims());
+    assertEquals(1, audiences.size());
+    assertTrue(audiences.contains("https://from-body"));
+    assertFalse(audiences.contains("https://from-query"));
+  }
+
+  @Test
+  public void testDynamicResourceRejectedWhenNotWhitelisted() throws Exception {
+    resourceParamValues = new String[] { "https://recipient1", "https://intruder" };
+    final Map<String, String> contextExpectations = new HashMap<>();
+    contextExpectations.put("knox.token.audience.validator", "whitelist");
+    contextExpectations.put("knox.token.audiences", "https://recipient1,https://recipient2");
+    configureCommonExpectations(contextExpectations);
+
+    TokenResource tr = new TokenResource();
+    tr.request = request;
+    tr.context = context;
+    tr.init();
+
+    Response retResponse = tr.doGet();
+    assertEquals(400, retResponse.getStatus());
+  }
+
+  @Test
+  public void testDynamicResourceRejectedWhenNotAValidUri() throws Exception {
+    // A resource that is present but not an absolute URI (RFC 8707 section 2) must be rejected,
+    // regardless of the selected validator.
+    resourceParamValues = new String[] { "not-a-uri" };
+    final Map<String, String> contextExpectations = new HashMap<>();
+    contextExpectations.put("knox.token.audience.validator", "passthrough");
+    configureCommonExpectations(contextExpectations);
+
+    TokenResource tr = new TokenResource();
+    tr.request = request;
+    tr.context = context;
+    tr.init();
+
+    Response retResponse = tr.doGet();
+    assertEquals(400, retResponse.getStatus());
+    final Map<String, Object> json = parseJSONResponse((String) retResponse.getEntity());
+    assertEquals(TokenResource.ErrorCode.INVALID_RESOURCE.toInt(), json.get("code"));
+  }
+
+  @Test
+  public void testDynamicResourceRejectedWhenUriHasFragment() throws Exception {
+    // RFC 8707 section 2: the resource URI MUST NOT include a fragment component.
+    resourceParamValues = new String[] { "https://recipient1#fragment" };
+    final Map<String, String> contextExpectations = new HashMap<>();
+    contextExpectations.put("knox.token.audience.validator", "passthrough");
+    configureCommonExpectations(contextExpectations);
+
+    TokenResource tr = new TokenResource();
+    tr.request = request;
+    tr.context = context;
+    tr.init();
+
+    Response retResponse = tr.doGet();
+    assertEquals(400, retResponse.getStatus());
+    final Map<String, Object> json = parseJSONResponse((String) retResponse.getEntity());
+    assertEquals(TokenResource.ErrorCode.INVALID_RESOURCE.toInt(), json.get("code"));
+  }
+
+  @Test
+  public void testDynamicResourceRejectionEscapesCallerSuppliedValueInErrorBody() throws Exception {
+    // The rejected resource value is echoed back in the error message; a value containing a double
+    // quote must be JSON-escaped so it cannot break out of the error body's JSON string.
+    resourceParamValues = new String[] { "not\"a\"uri" };
+    final Map<String, String> contextExpectations = new HashMap<>();
+    contextExpectations.put("knox.token.audience.validator", "passthrough");
+    configureCommonExpectations(contextExpectations);
+
+    TokenResource tr = new TokenResource();
+    tr.request = request;
+    tr.context = context;
+    tr.init();
+
+    Response retResponse = tr.doGet();
+    assertEquals(400, retResponse.getStatus());
+    // The body must still be parseable JSON (i.e. the quotes did not break out of the string) ...
+    final Map<String, Object> json = parseJSONResponse((String) retResponse.getEntity());
+    assertEquals(TokenResource.ErrorCode.INVALID_RESOURCE.toInt(), json.get("code"));
+    // ... and the caller-supplied value must round-trip intact inside the error message.
+    assertTrue(((String) json.get("error")).contains("not\"a\"uri"));
+  }
+
+  @Test
+  public void testDynamicResourceMultipleValuesAndCommaSeparated() throws Exception {
+    resourceParamValues = new String[] { "https://recipient1", " https://recipient2 , https://recipient3" };
+    final Map<String, String> contextExpectations = new HashMap<>();
+    contextExpectations.put("knox.token.audience.validator", "whitelist");
+    contextExpectations.put("knox.token.audiences", "https://recipient1,https://recipient2,https://recipient3");
+    configureCommonExpectations(contextExpectations);
+
+    TokenResource tr = new TokenResource();
+    tr.request = request;
+    tr.context = context;
+    tr.init();
+
+    Response retResponse = tr.doGet();
+    assertEquals(200, retResponse.getStatus());
+
+    JWT parsedToken = new JWTToken(getTagValue(retResponse.getEntity().toString(), "access_token"));
+    List<String> audiences = Arrays.asList(parsedToken.getAudienceClaims());
+    assertEquals(3, audiences.size());
+    assertTrue(audiences.contains("https://recipient1"));
+    assertTrue(audiences.contains("https://recipient2"));
+    assertTrue(audiences.contains("https://recipient3"));
   }
 
   @Test
@@ -608,6 +962,68 @@ public class TokenServiceResourceTest {
     assertTrue(expiresDate.after(now));
     long diff = expiresDate.getTime() - now.getTime();
     assertTrue(diff < 60000L && diff > 30000L);
+  }
+
+  /**
+   * KNOX-3459: When an upstream token exchange conveys an authoritative delegation-policy TTL, the
+   * minted token honors it directly and it takes precedence over - is not capped by - the topology
+   * knox.token.ttl upper bound. Here the policy TTL (3600s) is far larger than the topology cap (60s),
+   * so a token whose lifetime exceeds the cap proves the policy value bypassed it rather than being
+   * clamped down.
+   */
+  @Test
+  @SuppressForbidden
+  public void testDelegationPolicyTtlIsHonoredAndBypassesTopologyCap() throws Exception {
+    final Map<String, String> contextExpectations = new HashMap<>();
+    contextExpectations.put("knox.token.ttl", "60000"); // 60s topology cap
+    exchangeRequestedTtlSec = 3600; // 1h authoritative policy TTL
+    configureCommonExpectations(contextExpectations);
+
+    TokenResource tr = new TokenResource();
+    tr.request = request;
+    tr.context = context;
+    tr.init();
+
+    Response retResponse = tr.doGet();
+    assertEquals(200, retResponse.getStatus());
+
+    JWT parsedToken = new JWTToken(getTagValue(retResponse.getEntity().toString(), "access_token"));
+    assertTrue(authority.verifyToken(parsedToken));
+
+    final long diff = parsedToken.getExpiresDate().getTime() - System.currentTimeMillis();
+    assertTrue("Policy TTL must not be capped by the smaller topology knox.token.ttl", diff > 60000L);
+    assertTrue("Token lifetime should reflect the 3600s policy TTL", diff <= 3600000L);
+  }
+
+  /**
+   * KNOX-3459: The authoritative delegation-policy TTL also bypasses the client-supplied lifespan
+   * shorten-only clamp. A lifespan of 30s would normally win over a 60s topology cap, but the policy
+   * TTL (3600s) is authoritative, so the minted token's lifetime reflects the policy value, not the
+   * much smaller lifespan.
+   */
+  @Test
+  @SuppressForbidden
+  public void testDelegationPolicyTtlBypassesLifespanClamp() throws Exception {
+    final Map<String, String> contextExpectations = new HashMap<>();
+    contextExpectations.put("knox.token.ttl", "60000"); // 60s topology cap
+    contextExpectations.put(TokenResource.LIFESPAN, "PT30S"); // client-supplied 30s lifespan
+    exchangeRequestedTtlSec = 3600; // 1h authoritative policy TTL
+    configureCommonExpectations(contextExpectations);
+
+    TokenResource tr = new TokenResource();
+    tr.request = request;
+    tr.context = context;
+    tr.init();
+
+    Response retResponse = tr.doGet();
+    assertEquals(200, retResponse.getStatus());
+
+    JWT parsedToken = new JWTToken(getTagValue(retResponse.getEntity().toString(), "access_token"));
+    assertTrue(authority.verifyToken(parsedToken));
+
+    final long diff = parsedToken.getExpiresDate().getTime() - System.currentTimeMillis();
+    assertTrue("Policy TTL must override the shorter client lifespan", diff > 60000L);
+    assertTrue("Token lifetime should reflect the 3600s policy TTL", diff <= 3600000L);
   }
 
   @Test
@@ -1046,6 +1462,104 @@ public class TokenServiceResourceTest {
   }
 
   @Test
+  public void testTokenDisable_Enabled_NoSubject() throws Exception {
+    final TokenRenewalTestConfigs configs = TokenRenewalTestConfigs.builder().serviceLevelConfig(true).build();
+    final Response response = doTestSetTokenEnabledFlag(configs, false);
+    validateSetEnabledFlagResponse(response, 403, false,
+            "Caller (null) not authorized to disable tokens.", TokenResource.ErrorCode.UNAUTHORIZED);
+  }
+
+  @Test
+  public void testTokenDisable_Enabled_UnauthorizedCaller() throws Exception {
+    final String caller = "scott";
+    final TokenRenewalTestConfigs configs = TokenRenewalTestConfigs.builder()
+            .serviceLevelConfig(true)
+            .caller(createTestSubject(caller))
+            .build();
+    final Response response = doTestSetTokenEnabledFlag(configs, false);
+    validateSetEnabledFlagResponse(response, 403, false,
+            "Caller (" + caller + ") not authorized to disable tokens.", TokenResource.ErrorCode.UNAUTHORIZED);
+  }
+
+  @Test
+  public void testTokenDisable_Enabled_OwnToken() throws Exception {
+    final TokenRenewalTestConfigs configs = TokenRenewalTestConfigs.builder()
+            .serviceLevelConfig(true)
+            .caller(createTestSubject(USER_NAME))
+            .build();
+    final Response response = doTestSetTokenEnabledFlag(configs, false);
+    validateSuccessfulSetEnabledFlagResponse(response, false);
+  }
+
+  @Test
+  public void testTokenDisable_Enabled_WithRenewerWhitelist() throws Exception {
+    final String caller = "scott";
+    final TokenRenewalTestConfigs configs = TokenRenewalTestConfigs.builder()
+            .serviceLevelConfig(true)
+            .renewers("tony, dany,  steve ," + caller)
+            .caller(createTestSubject(caller))
+            .build();
+    final Response response = doTestSetTokenEnabledFlag(configs, false);
+    validateSuccessfulSetEnabledFlagResponse(response, false);
+  }
+
+  @Test
+  public void testTokenDisable_Enabled_WithGroupRenewerWhitelist() throws Exception {
+    final String caller = "scott";
+    final String group = "devOps";
+    final TokenRenewalTestConfigs configs = TokenRenewalTestConfigs.builder()
+            .serviceLevelConfig(true)
+            .groupRenewers(group)
+            .caller(createTestSubject(caller, group))
+            .build();
+    final Response response = doTestSetTokenEnabledFlag(configs, false);
+    validateSuccessfulSetEnabledFlagResponse(response, false);
+  }
+
+  @Test
+  public void testTokenEnable_UnauthorizedCallerRejectedBeforeStateCheck() throws Exception {
+    final String caller = "scott";
+    final TokenRenewalTestConfigs configs = TokenRenewalTestConfigs.builder()
+            .serviceLevelConfig(true)
+            .caller(createTestSubject(caller))
+            .build();
+    final Response response = doTestSetTokenEnabledFlag(configs, true);
+    validateSetEnabledFlagResponse(response, 403, false,
+            "Caller (" + caller + ") not authorized to enable tokens.", TokenResource.ErrorCode.UNAUTHORIZED);
+  }
+
+  @Test
+  public void testTokenEnable_AlreadyEnabled_OwnerGetsStateCheck() throws Exception {
+    final TokenRenewalTestConfigs configs = TokenRenewalTestConfigs.builder()
+            .serviceLevelConfig(true)
+            .caller(createTestSubject(USER_NAME))
+            .build();
+    final Response response = doTestSetTokenEnabledFlag(configs, true);
+    validateSetEnabledFlagResponse(response, 400, false,
+            "Token is already enabled", TokenResource.ErrorCode.ALREADY_ENABLED);
+  }
+
+  @Test
+  public void testTokenDisable_Enabled_ImpersonatorCanDisableCreatedToken() throws Exception {
+    final Response response = doTestImpersonatedTokenSetEnabledFlag(createTestSubject(USER_NAME), false);
+    validateSuccessfulSetEnabledFlagResponse(response, false);
+  }
+
+  @Test
+  public void testTokenDisable_Enabled_ImpersonatedUserCanDisableOwnToken() throws Exception {
+    final Response response = doTestImpersonatedTokenSetEnabledFlag(createTestSubject("impersonatedUserName"), false);
+    validateSuccessfulSetEnabledFlagResponse(response, false);
+  }
+
+  @Test
+  public void testTokenDisable_Enabled_UnauthorizedCallerCannotDisableImpersonatedToken() throws Exception {
+    final String caller = "scott";
+    final Response response = doTestImpersonatedTokenSetEnabledFlag(createTestSubject(caller), false);
+    validateSetEnabledFlagResponse(response, 403, false,
+            "Caller (" + caller + ") not authorized to disable tokens.", TokenResource.ErrorCode.UNAUTHORIZED);
+  }
+
+  @Test
   public void testKidJkuClaims() throws Exception {
     final Map<String, String> contextExpectations = new HashMap<>();
     contextExpectations.put("knox.token.ttl", "60000");
@@ -1242,12 +1756,86 @@ public class TokenServiceResourceTest {
   }
 
   private Response getUserTokensResponse(TokenResource tokenResource, boolean createdBy) {
+    return getUserTokensResponse(tokenResource, createTestSubject(USER_NAME),
+        Collections.singletonMap(createdBy ? "createdBy" : "userName", USER_NAME));
+  }
+
+  private Response getUserTokensResponse(TokenResource tokenResource, Subject caller, Map<String, String> queryParams) {
     final MultivaluedMap<String, String> queryParameters = new MultivaluedHashMap<>();
-    queryParameters.put(createdBy ? "createdBy" : "userName", Arrays.asList(USER_NAME));
+    queryParams.forEach((key, value) -> queryParameters.put(key, Arrays.asList(value)));
     final UriInfo uriInfo = EasyMock.createNiceMock(UriInfo.class);
     EasyMock.expect(uriInfo.getQueryParameters()).andReturn(queryParameters).anyTimes();
     EasyMock.replay(uriInfo);
-    return tokenResource.getUserTokens(uriInfo);
+    return Subject.doAs(caller, (PrivilegedAction<Response>) () -> tokenResource.getUserTokens(uriInfo));
+  }
+
+  private TokenResource createTokenResourceWithTokensFor(String... users) throws Exception {
+    configureCommonExpectations(new HashMap<>(), Boolean.TRUE);
+    final TokenResource tr = new TokenResource();
+    tr.request = request;
+    tr.context = context;
+    tr.init();
+    for (String user : users) {
+      Subject.doAs(createTestSubject(user), (PrivilegedAction<Response>) () -> tr.doGet());
+    }
+    return tr;
+  }
+
+  @SuppressWarnings("unchecked")
+  private int tokenCount(Response response) {
+    final Collection<Object> tokens = ((Map<String, Collection<Object>>) JsonUtils.getObjectFromJsonString(response.getEntity().toString()))
+        .get("tokens");
+    return tokens.size();
+  }
+
+  @Test
+  public void testGetUserTokensOwnerCanSeeOwnTokens() throws Exception {
+    final TokenResource tr = createTokenResourceWithTokensFor(USER_NAME);
+    final Response response = getUserTokensResponse(tr, createTestSubject(USER_NAME), Collections.singletonMap("userName", USER_NAME));
+    assertEquals(Response.Status.OK.getStatusCode(), response.getStatus());
+    assertEquals(1, tokenCount(response));
+  }
+
+  @Test
+  public void testGetUserTokensUnauthorizedForOtherUser() throws Exception {
+    final TokenResource tr = createTokenResourceWithTokensFor(USER_NAME);
+    final Response response = getUserTokensResponse(tr, createTestSubject("bob"), Collections.singletonMap("userName", USER_NAME));
+    assertEquals(Response.Status.FORBIDDEN.getStatusCode(), response.getStatus());
+    assertTrue(response.getEntity().toString().contains("not authorized"));
+  }
+
+  @Test
+  public void testGetUserTokensUnauthorizedForUserNameOrCreatedByOfOtherUser() throws Exception {
+    final TokenResource tr = createTokenResourceWithTokensFor(USER_NAME);
+    final Response response = getUserTokensResponse(tr, createTestSubject("bob"), Collections.singletonMap("userNameOrCreatedBy", USER_NAME));
+    assertEquals(Response.Status.FORBIDDEN.getStatusCode(), response.getStatus());
+    assertTrue(response.getEntity().toString().contains("not authorized"));
+  }
+
+  @Test
+  public void testGetUserTokensAllTokensDeniedForOrdinaryUser() throws Exception {
+    final TokenResource tr = createTokenResourceWithTokensFor(USER_NAME);
+    final Response response = getUserTokensResponse(tr, createTestSubject("bob"), Collections.singletonMap("allTokens", "true"));
+    assertEquals(Response.Status.FORBIDDEN.getStatusCode(), response.getStatus());
+    assertTrue(response.getEntity().toString().contains("not authorized"));
+  }
+
+  @Test
+  public void testGetUserTokensAdminCanSeeAllTokens() throws Exception {
+    final TokenResource tr = createTokenResourceWithTokensFor(USER_NAME, "bob");
+    usersCanSeeAllTokens.add("admin");
+    final Response response = getUserTokensResponse(tr, createTestSubject("admin"), Collections.singletonMap("allTokens", "true"));
+    assertEquals(Response.Status.OK.getStatusCode(), response.getStatus());
+    assertEquals(2, tokenCount(response));
+  }
+
+  @Test
+  public void testGetUserTokensAdminCanSeeOtherUsersTokens() throws Exception {
+    final TokenResource tr = createTokenResourceWithTokensFor(USER_NAME);
+    usersCanSeeAllTokens.add("admin");
+    final Response response = getUserTokensResponse(tr, createTestSubject("admin"), Collections.singletonMap("userName", USER_NAME));
+    assertEquals(Response.Status.OK.getStatusCode(), response.getStatus());
+    assertEquals(1, tokenCount(response));
   }
 
   @Test
@@ -1266,6 +1854,153 @@ public class TokenServiceResourceTest {
       testLimitingTokensPerUser(10, 11, true);
     } catch (Exception e) {
       fail("Exception should NOT have been thrown");
+    }
+  }
+
+  @Test
+  public void testTokenLimitPerUserByTypeIgnoresClientCredentialsAndApiKeysByDefault() throws Exception {
+    // knox.token.limit.per.user.by.type.enabled is not set -> tokens are counted per type
+    final TokenResource tr = initTokenResourceForTokenLimitByTypeTest(3, null, false);
+    retypeToken(getTokenId(acquireToken(tr)), TokenMetadataType.CLIENT_ID);
+    retypeToken(getTokenId(acquireToken(tr)), TokenMetadataType.API_KEY);
+
+    // the client credential and the API key are not counted -> 3 JWTs can still be acquired
+    for (int i = 0; i < 3; i++) {
+      acquireToken(tr);
+    }
+    assertTokenLimitExceeded(tr);
+  }
+
+  @Test
+  public void testTokenLimitPerUserByTypeCountsAuthCodesAndRefreshTokens() throws Exception {
+    final TokenResource tr = initTokenResourceForTokenLimitByTypeTest(3, true, false);
+    retypeToken(getTokenId(acquireToken(tr)), TokenMetadataType.AUTH_CODE);
+    retypeToken(getTokenId(acquireToken(tr)), TokenMetadataType.REFRESH_TOKEN);
+    acquireToken(tr);
+    assertTokenLimitExceeded(tr);
+  }
+
+  @Test
+  public void testTokenLimitPerUserNotByTypeCountsClientCredentialsAndApiKeys() throws Exception {
+    // the legacy behavior: all tokens but KnoxSSO cookies are counted
+    final TokenResource tr = initTokenResourceForTokenLimitByTypeTest(3, false, false);
+    retypeToken(getTokenId(acquireToken(tr)), TokenMetadataType.CLIENT_ID);
+    retypeToken(getTokenId(acquireToken(tr)), TokenMetadataType.API_KEY);
+    acquireToken(tr);
+    assertTokenLimitExceeded(tr);
+  }
+
+  @Test
+  public void testTokenLimitPerUserByTypeShouldRevokeOldestTokenOfTheSameType() throws Exception {
+    final TokenResource tr = initTokenResourceForTokenLimitByTypeTest(2, true, true);
+    final String clientId = getTokenId(acquireToken(tr));
+    retypeToken(clientId, TokenMetadataType.CLIENT_ID);
+    Thread.sleep(5);
+    final String oldestJwtId = getTokenId(acquireToken(tr));
+    Thread.sleep(5);
+    final String secondJwtId = getTokenId(acquireToken(tr));
+    Thread.sleep(5);
+    final String newestJwtId = getTokenId(acquireToken(tr));
+
+    // the oldest JWT is revoked, the even older client credential is kept
+    assertNotNull(tss.getTokenMetadata(clientId));
+    assertNull(tss.getTokenMetadata(oldestJwtId));
+    assertNotNull(tss.getTokenMetadata(secondJwtId));
+    assertNotNull(tss.getTokenMetadata(newestJwtId));
+  }
+
+  @Test
+  public void testClientCredentialsTokenLimitPerUserByTypeIgnoresJWTsByDefault() throws Exception {
+    assertEquals(2, countAcquirableClientCredentialsWithPreExistingJWTs(null));
+  }
+
+  @Test
+  public void testClientCredentialsTokenLimitPerUserByTypeIgnoresJWTs() throws Exception {
+    assertEquals(2, countAcquirableClientCredentialsWithPreExistingJWTs(true));
+  }
+
+  @Test
+  public void testClientCredentialsTokenLimitPerUserNotByTypeCountsJWTs() throws Exception {
+    assertEquals(0, countAcquirableClientCredentialsWithPreExistingJWTs(false));
+  }
+
+  /**
+   * Acquires 3 JWTs (unlimited KNOXTOKEN limit) and then as many client credentials as the
+   * {@code clientid.knox.token.limit.per.user=2} limit allows (up to 5).
+   */
+  private int countAcquirableClientCredentialsWithPreExistingJWTs(Boolean limitByType) throws Exception {
+    try {
+      tss = new PersistentTestTokenStateService();
+      final Map<String, String> contextExpectations = new HashMap<>();
+      contextExpectations.put("clientid." + KNOX_TOKEN_USER_LIMIT_PER_USER, "2");
+      if (limitByType != null) {
+        contextExpectations.put("clientid." + KNOX_TOKEN_USER_LIMIT_PER_USER_BY_TYPE_ENABLED, String.valueOf(limitByType));
+      }
+      configureCommonExpectations(contextExpectations, Boolean.TRUE);
+
+      final TokenResource tr = new TokenResource();
+      tr.request = request;
+      tr.context = context;
+      tr.init();
+      for (int i = 0; i < 3; i++) {
+        acquireToken(tr);
+      }
+
+      final ClientCredentialsResource ccr = new ClientCredentialsResource();
+      ccr.request = request;
+      ccr.context = context;
+      ccr.init();
+      int acquiredClientCredentials = 0;
+      for (int i = 0; i < 5; i++) {
+        final Response response = Subject.doAs(createTestSubject(USER_NAME), (PrivilegedAction<Response>) ccr::doPost);
+        if (response.getStatus() != Response.Status.OK.getStatusCode()) {
+          assertEquals(Response.Status.FORBIDDEN.getStatusCode(), response.getStatus());
+          assertTrue(response.getEntity().toString().contains("Unable to get token - token limit exceeded."));
+          break;
+        }
+        acquiredClientCredentials++;
+      }
+      return acquiredClientCredentials;
+    } finally {
+      tss = new TestTokenStateService();
+    }
+  }
+
+  private TokenResource initTokenResourceForTokenLimitByTypeTest(int limit, Boolean limitByType, boolean revokeOldestToken) throws Exception {
+    final Map<String, String> contextExpectations = new HashMap<>();
+    contextExpectations.put(KNOX_TOKEN_USER_LIMIT_PER_USER, String.valueOf(limit));
+    if (limitByType != null) {
+      contextExpectations.put(KNOX_TOKEN_USER_LIMIT_PER_USER_BY_TYPE_ENABLED, String.valueOf(limitByType));
+    }
+    if (revokeOldestToken) {
+      contextExpectations.put(KNOX_TOKEN_USER_LIMIT_EXCEEDED_ACTION, TokenResource.UserLimitExceededAction.REMOVE_OLDEST.name());
+    }
+    configureCommonExpectations(contextExpectations, Boolean.TRUE);
+    final TokenResource tr = new TokenResource();
+    tr.request = request;
+    tr.context = context;
+    tr.init();
+    return tr;
+  }
+
+  private String getTokenId(Response tokenResponse) {
+    final String tokenId = getTagValue(tokenResponse.getEntity().toString(), "token_id");
+    assertNotNull(tokenId);
+    return tokenId;
+  }
+
+  private void retypeToken(String tokenId, TokenMetadataType type) throws Exception {
+    final TokenMetadata tokenMetadata = tss.getTokenMetadata(tokenId);
+    tokenMetadata.setType(type);
+    tss.addMetadata(tokenId, tokenMetadata);
+  }
+
+  private void assertTokenLimitExceeded(TokenResource tr) {
+    try {
+      acquireToken(tr);
+      fail("Exception should have been thrown");
+    } catch (Exception e) {
+      assertTrue(e.getMessage().contains("Unable to get token - token limit exceeded."));
     }
   }
 
@@ -1519,6 +2254,116 @@ public class TokenServiceResourceTest {
   }
 
   @Test
+  public void testUserSuppliedClientIdUsedWhenEnabled() throws Exception {
+    final String supplied = "my-app.dev_1";
+    // The returned client_id is the token's token_id, so equality proves it became the identifier.
+    final String clientId = registerClientCredentials("true", supplied, 200);
+    assertEquals(supplied, clientId);
+  }
+
+  @Test
+  public void testUserSuppliedClientIdIgnoredWhenDisabledByDefault() throws Exception {
+    final String supplied = "my-app.dev_1";
+    final String clientId = registerClientCredentials(null, supplied, 200);
+    assertNotEquals(supplied, clientId);
+    assertGeneratedUuid(clientId);
+  }
+
+  @Test
+  public void testUserSuppliedClientIdIgnoredWhenExplicitlyDisabled() throws Exception {
+    final String supplied = "my-app.dev_1";
+    final String clientId = registerClientCredentials("false", supplied, 200);
+    assertNotEquals(supplied, clientId);
+    assertGeneratedUuid(clientId);
+  }
+
+  @Test
+  public void testOmittedClientIdReturnsGeneratedIdWhenEnabled() throws Exception {
+    final String clientId = registerClientCredentials("true", null, 200);
+    assertGeneratedUuid(clientId);
+  }
+
+  @Test
+  public void testInvalidUserSuppliedClientIdRejected() throws Exception {
+    tryInvalidUserSuppliedClientId("bad id/with*chars");
+    tryInvalidUserSuppliedClientId(StringUtils.repeat('a', 129));
+  }
+
+  private void tryInvalidUserSuppliedClientId(String supplied) throws Exception {
+    try {
+      tss = new PersistentTestTokenStateService();
+      clientIdParamValue = supplied;
+      final Map<String, String> contextExpectations = new HashMap<>();
+      contextExpectations.put("clientid.allowUserSuppliedClientId", "true");
+      configureCommonExpectations(contextExpectations, Boolean.TRUE);
+      final ClientCredentialsResource ccr = new ClientCredentialsResource();
+      ccr.request = request;
+      ccr.context = context;
+      ccr.init();
+
+      final Response response = ccr.doPost();
+      assertEquals(400, response.getStatus());
+      assertEquals("invalid_request", getTagValue(response.getEntity().toString(), "error"));
+    } finally {
+      tss = new TestTokenStateService();
+    }
+  }
+
+  @Test
+  public void testDuplicateUserSuppliedClientIdConflict() throws Exception {
+    final String supplied = "dup-app_1";
+    try {
+      tss = new DuplicateRejectingTokenStateService();
+      clientIdParamValue = supplied;
+      final Map<String, String> contextExpectations = new HashMap<>();
+      contextExpectations.put("clientid.allowUserSuppliedClientId", "true");
+      configureCommonExpectations(contextExpectations, Boolean.TRUE);
+      final ClientCredentialsResource ccr = new ClientCredentialsResource();
+      ccr.request = request;
+      ccr.context = context;
+      ccr.init();
+
+      final Response first = ccr.doPost();
+      assertEquals(200, first.getStatus());
+      assertEquals(supplied, getTagValue(first.getEntity().toString(), ClientCredentialsResource.CLIENT_ID));
+
+      final Response second = ccr.doPost();
+      assertEquals(409, second.getStatus());
+      assertEquals("invalid_client", getTagValue(second.getEntity().toString(), "error"));
+    } finally {
+      tss = new TestTokenStateService();
+    }
+  }
+
+  private String registerClientCredentials(String allowUserSuppliedClientId, String suppliedClientId, int expectedStatus) throws Exception {
+    try {
+      tss = new PersistentTestTokenStateService();
+      clientIdParamValue = suppliedClientId;
+      final Map<String, String> contextExpectations = new HashMap<>();
+      if (allowUserSuppliedClientId != null) {
+        contextExpectations.put("clientid.allowUserSuppliedClientId", allowUserSuppliedClientId);
+      }
+      configureCommonExpectations(contextExpectations, Boolean.TRUE);
+      final ClientCredentialsResource ccr = new ClientCredentialsResource();
+      ccr.request = request;
+      ccr.context = context;
+      ccr.init();
+
+      final Response response = ccr.doPost();
+      assertEquals(expectedStatus, response.getStatus());
+      return getTagValue(response.getEntity().toString(), ClientCredentialsResource.CLIENT_ID);
+    } finally {
+      tss = new TestTokenStateService();
+    }
+  }
+
+  private static void assertGeneratedUuid(String clientId) {
+    assertNotNull(clientId);
+    // A generated id is a random UUID; UUID.fromString throws if it is not.
+    UUID.fromString(clientId);
+  }
+
+  @Test
   public void testClientCredentialsResponse() throws Exception {
     tryClientCredentialsResource(null);
     tryClientCredentialsResource("30000");
@@ -1700,6 +2545,42 @@ public class TokenServiceResourceTest {
     return doTestTokenLifecyle(TokenLifecycleOperation.Revoke, configs.isTokenStateServerManaged(), null, configs.getRenewers(), configs.getGroupRenewers(), null, configs.getCaller(), impersonatedUser).getValue();
   }
 
+  private Response doTestSetTokenEnabledFlag(final TokenRenewalTestConfigs configs, final boolean enable) throws Exception {
+    final TokenLifecycleOperation operation = enable ? TokenLifecycleOperation.Enable : TokenLifecycleOperation.Disable;
+    return doTestTokenLifecyle(operation, configs.isTokenStateServerManaged(), null, configs.getRenewers(), configs.getGroupRenewers(), null, configs.getCaller(), null).getValue();
+  }
+
+  /**
+   * Issues a token under an impersonating subject (so the persisted metadata has
+   * userName=impersonated user and createdBy=impersonator) and then attempts to flip its
+   * enabled flag as {@code caller}. Mirrors the impersonated-token creation flow in
+   * {@link #testCreateImpersonatedToken(boolean)}.
+   */
+  private Response doTestImpersonatedTokenSetEnabledFlag(final Subject caller, final boolean enable) throws Exception {
+    final String impersonatedUser = "impersonatedUserName";
+    final Map<String, String> contextExpectations = new HashMap<>();
+    contextExpectations.put("knox.token.exp.server-managed", Boolean.TRUE.toString());
+    contextExpectations.put(TokenResource.QUERY_PARAMETER_DOAS, impersonatedUser);
+    contextExpectations.put(AuthFilterUtils.PROXYUSER_PREFIX + "." + USER_NAME + ".users", impersonatedUser);
+    contextExpectations.put(AuthFilterUtils.PROXYUSER_PREFIX + "." + USER_NAME + ".hosts", "*");
+    contextExpectations.put(ContextAttributes.IMPERSONATION_ENABLED_ATTRIBUTE, Boolean.TRUE.toString());
+    configureCommonExpectations(contextExpectations, Boolean.TRUE);
+
+    final TokenResource tr = new TokenResource();
+    tr.request = request;
+    tr.context = context;
+    tr.init();
+
+    final Subject issuer = createTestSubject(USER_NAME);
+    issuer.getPrincipals().add(new ImpersonatedPrincipal(impersonatedUser));
+    final Response issueResponse = Subject.doAs(issuer, (PrivilegedAction<Response>) () -> tr.doGet());
+    assertEquals(200, issueResponse.getStatus());
+    final String accessToken = getTagValue(issueResponse.getEntity().toString(), "access_token");
+    final String tokenId = TokenUtils.getTokenId(new JWTToken(accessToken));
+
+    return requestSetTokenEnabledFlag(tr, tokenId, enable, caller);
+  }
+
   /**
    * @param operation          A TokenLifecycleOperation
    * @param serviceLevelConfig true, if server-side token state management should be enabled at the service level;
@@ -1751,6 +2632,8 @@ public class TokenServiceResourceTest {
     Response response = switch (operation) {
         case Renew -> requestTokenRenewal(tr, accessToken, caller);
         case Revoke -> requestTokenRevocation(tr, accessToken, caller);
+        case Enable -> requestSetTokenEnabledFlag(tr, TokenUtils.getTokenId(new JWTToken(accessToken)), true, caller);
+        case Disable -> requestSetTokenEnabledFlag(tr, TokenUtils.getTokenId(new JWTToken(accessToken)), false, caller);
     };
 
       return new AbstractMap.SimpleEntry<>(tss, response);
@@ -1792,6 +2675,11 @@ public class TokenServiceResourceTest {
     return response;
   }
 
+  private static Response requestSetTokenEnabledFlag(final TokenResource tr, final String tokenId, final boolean enable, final Subject caller) {
+    final PrivilegedAction<Response> action = () -> enable ? tr.enable(tokenId) : tr.disable(tokenId);
+    return caller != null ? Subject.doAs(caller, action) : action.run();
+  }
+
   private static void validateSuccessfulRenewalResponse(final Response response) throws IOException {
     validateRenewalResponse(response, 200, true, null, null);
   }
@@ -1801,13 +2689,22 @@ public class TokenServiceResourceTest {
                                               final boolean  expectedResult,
                                               final String   expectedMessage,
                                               final TokenResource.ErrorCode expectedCode) throws IOException {
+    validateLifecycleResponse(response, "renewed", expectedStatusCode, expectedResult, expectedMessage, expectedCode);
+  }
+
+  private static void validateLifecycleResponse(final Response response,
+                                                final String   resultField,
+                                                final int      expectedStatusCode,
+                                                final boolean  expectedResult,
+                                                final String   expectedMessage,
+                                                final TokenResource.ErrorCode expectedCode) throws IOException {
     assertEquals(expectedStatusCode, response.getStatus());
     assertTrue(response.hasEntity());
     String responseContent = (String) response.getEntity();
     assertNotNull(responseContent);
     assertFalse(responseContent.isEmpty());
     Map<String, Object> json = parseJSONResponse(responseContent);
-    boolean result = Boolean.valueOf((String)json.get("renewed"));
+    boolean result = Boolean.parseBoolean((String) json.get(resultField));
     assertEquals(expectedResult, result);
     assertEquals(expectedMessage, json.get("error"));
     if (expectedCode != null) {
@@ -1824,18 +2721,21 @@ public class TokenServiceResourceTest {
                                                  final boolean  expectedResult,
                                                  final String   expectedMessage,
                                                  final TokenResource.ErrorCode expectedCode) throws IOException {
-    assertEquals(expectedStatusCode, response.getStatus());
-    assertTrue(response.hasEntity());
-    String responseContent = (String) response.getEntity();
-    assertNotNull(responseContent);
-    assertFalse(responseContent.isEmpty());
-    Map<String, Object> json = parseJSONResponse(responseContent);
-    boolean result = Boolean.valueOf((String)json.get("revoked"));
-    assertEquals(expectedResult, result);
-    assertEquals(expectedMessage, json.get("error"));
-    if (expectedCode != null) {
-      assertEquals(expectedCode.toInt(), json.get("code"));
-    }
+    validateLifecycleResponse(response, "revoked", expectedStatusCode, expectedResult, expectedMessage, expectedCode);
+  }
+
+  private static void validateSuccessfulSetEnabledFlagResponse(final Response response, final boolean enable) throws IOException {
+    validateSetEnabledFlagResponse(response, 200, true, null, null);
+    final Map<String, Object> json = parseJSONResponse((String) response.getEntity());
+    assertEquals(String.valueOf(enable), json.get("isEnabled"));
+  }
+
+  private static void validateSetEnabledFlagResponse(final Response response,
+                                                     final int      expectedStatusCode,
+                                                     final boolean  expectedResult,
+                                                     final String   expectedMessage,
+                                                     final TokenResource.ErrorCode expectedCode) throws IOException {
+    validateLifecycleResponse(response, "setEnabledFlag", expectedStatusCode, expectedResult, expectedMessage, expectedCode);
   }
 
 
@@ -2038,6 +2938,23 @@ public class TokenServiceResourceTest {
   private static class PersistentTestTokenStateService extends TestTokenStateService implements PersistentTokenStateService {
   }
 
+  /**
+   * Persistent token state service that mirrors the KNOX_TOKENS.token_id primary-key guarantee:
+   * a second {@code addToken} for an id already present throws {@link TokenAlreadyExistsException},
+   * exactly as {@code JDBCTokenStateService} translates a unique-constraint violation.
+   */
+  private static class DuplicateRejectingTokenStateService extends PersistentTestTokenStateService {
+    private final Set<String> knownTokenIds = ConcurrentHashMap.newKeySet();
+
+    @Override
+    public void addToken(String tokenId, long issueTime, long expiration, long maxLifetimeDuration) {
+      if (!knownTokenIds.add(tokenId)) {
+        throw new TokenAlreadyExistsException("A token with id " + tokenId + " already exists");
+      }
+      super.addToken(tokenId, issueTime, expiration, maxLifetimeDuration);
+    }
+  }
+
   private static class TestJWTokenAuthority implements JWTokenAuthority {
 
     private RSAPublicKey publicKey;
@@ -2219,6 +3136,122 @@ public class TokenServiceResourceTest {
     assertNull("'act' claim should NOT be present when there is no impersonation", actClaim);
 
     EasyMock.verify(request, context);
+  }
+
+  /**
+   * KNOX-3458: A delegation exchange whose resulting actor chain would stay within the (default)
+   * maximum depth is minted normally. With the default bound of 3 an existing 2-actor chain plus the
+   * new actor lands exactly on the limit.
+   */
+  @Test
+  @SuppressForbidden
+  public void testActClaimAtMaxChainDepthAllowed() throws Exception {
+    configureCommonExpectations(createDelegatedAuthContextExpectations(true, true), true);
+    final Subject subject = createSubjectWithChainAndImpersonation("admin", "alice", 2);
+    final JWTToken parsedToken = getTokenWithSubject(subject);
+
+    assertEquals("alice", parsedToken.getSubject());
+    assertEquals("Resulting chain should sit exactly on the default maximum of 3",
+        3, TokenUtils.extractActorChain(parsedToken).size());
+
+    EasyMock.verify(request, context);
+  }
+
+  /**
+   * KNOX-3458: A delegation exchange whose resulting actor chain would exceed the (default) maximum
+   * depth is rejected before minting. With the default bound of 3 an existing 3-actor chain plus the
+   * new actor would be 4.
+   */
+  @Test
+  @SuppressForbidden
+  public void testExchangeRejectedWhenChainDepthExceeded() throws Exception {
+    configureCommonExpectations(createDelegatedAuthContextExpectations(true, true), true);
+    final Subject subject = createSubjectWithChainAndImpersonation("admin", "alice", 3);
+    final Response response = getRawTokenResponse(subject);
+
+    assertEquals(400, response.getStatus());
+    final String entity = response.getEntity().toString();
+    assertTrue("Error body should explain the depth violation, but was: " + entity,
+        entity.contains("would exceed the configured maximum"));
+    // The rejection must conform to the RFC 8693 (§2.2.2 -> RFC 6749 §5.2) error format:
+    // {"error": "invalid_request", "error_description": ...}.
+    assertTrue("Error body should carry the RFC 8693 invalid_request error code, but was: " + entity,
+        entity.contains("invalid_request"));
+    assertTrue("Error body should carry an error_description, but was: " + entity,
+        entity.contains("error_description"));
+
+    EasyMock.verify(request, context);
+  }
+
+  /**
+   * KNOX-3458: The maximum chain depth is configurable via delegation.max.actor.chain.depth. With the
+   * bound set to 3, an existing 3-actor chain plus the new actor (resulting depth 4) is rejected.
+   */
+  @Test
+  @SuppressForbidden
+  public void testConfiguredMaxChainDepthIsEnforced() throws Exception {
+    final Map<String, String> contextExpectations = createDelegatedAuthContextExpectations(true, true);
+    contextExpectations.put(TokenResource.DELEGATION_MAX_ACTOR_CHAIN_DEPTH, "3");
+    configureCommonExpectations(contextExpectations, true);
+
+    final Subject subject = createSubjectWithChainAndImpersonation("admin", "alice", 3);
+    final Response response = getRawTokenResponse(subject);
+
+    assertEquals(400, response.getStatus());
+    assertTrue(response.getEntity().toString().contains("would exceed the configured maximum"));
+
+    EasyMock.verify(request, context);
+  }
+
+  /**
+   * KNOX-3458: A configured value that is not a positive integer is ignored and the default maximum
+   * (3) is enforced instead - proving the fallback is the default bound, not an unlimited chain: an
+   * existing 10-actor chain (resulting depth 11) is still rejected.
+   */
+  @Test
+  @SuppressForbidden
+  public void testInvalidMaxChainDepthFallsBackToDefault() throws Exception {
+    final Map<String, String> contextExpectations = createDelegatedAuthContextExpectations(true, true);
+    contextExpectations.put(TokenResource.DELEGATION_MAX_ACTOR_CHAIN_DEPTH, "not-a-number");
+    configureCommonExpectations(contextExpectations, true);
+
+    final Subject subject = createSubjectWithChainAndImpersonation("admin", "alice", 10);
+    final Response response = getRawTokenResponse(subject);
+
+    assertEquals(400, response.getStatus());
+
+    EasyMock.verify(request, context);
+  }
+
+  /**
+   * Helper: build a Subject carrying an existing actor chain of the given size plus an impersonation,
+   * so that minting adds one more actor on top of that chain.
+   */
+  private Subject createSubjectWithChainAndImpersonation(String primaryUser, String impersonatedUser, int existingChainSize) {
+    final Subject subject = createSubjectWithOptionalImpersonation(primaryUser, impersonatedUser);
+    if (existingChainSize > 0) {
+      final List<Map<String, Object>> chain = new ArrayList<>();
+      for (int i = 0; i < existingChainSize; i++) {
+        final Map<String, Object> actor = new LinkedHashMap<>();
+        actor.put("sub", "prior-actor-" + i);
+        chain.add(actor);
+      }
+      subject.getPrincipals().add(new ActorChainPrincipalImpl(chain));
+    }
+    return subject;
+  }
+
+  /**
+   * Helper: issue a token with the given subject context and return the raw Response without asserting
+   * success, so error (rejection) paths can be inspected.
+   */
+  @SuppressForbidden
+  private Response getRawTokenResponse(Subject subject) throws Exception {
+    final TokenResource tr = new TokenResource();
+    tr.request = request;
+    tr.context = context;
+    tr.init();
+    return Subject.doAs(subject, (PrivilegedAction<Response>) tr::doGet);
   }
 
   /**

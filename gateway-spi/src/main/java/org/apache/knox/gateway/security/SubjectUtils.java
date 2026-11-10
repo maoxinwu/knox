@@ -24,6 +24,8 @@ import javax.security.auth.Subject;
 import java.security.AccessController;
 import java.security.Principal;
 import java.util.Collections;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -102,8 +104,63 @@ public class SubjectUtils {
     return subject.getPrincipals(TokenIdPrincipal.class);
   }
 
+  /**
+   * Get the caller's auth token credentials from the subject's private credentials.
+   *
+   * <p>The token is carried as a private credential rather than a principal so that it can
+   * never be mistaken for an identity by {@link #getPrimaryPrincipalName(Subject)}.</p>
+   *
+   * @param subject the subject to interrogate
+   * @return the auth token credentials, empty when the subject is null or carries none
+   */
+  public static Set<AuthTokenCredential> getAuthTokenCredentials(Subject subject) {
+    return subject == null ? Collections.emptySet() : subject.getPrivateCredentials(AuthTokenCredential.class);
+  }
+
+  /**
+   * Get the caller's serialized JWT from the subject, if one was captured at authentication time.
+   *
+   * @param subject the subject to interrogate
+   * @return the serialized token, or null when the subject is null or carries no auth token
+   */
+  public static String getAuthToken(Subject subject) {
+    final Set<AuthTokenCredential> credentials = getAuthTokenCredentials(subject);
+    return credentials.isEmpty() ? null : credentials.iterator().next().getToken();
+  }
+
   public static Set<ActorChainPrincipal> getActorChainPrincipal(Subject currentSubject, Subject subject) {
     return currentSubject.getPrincipals(ActorChainPrincipal.class);
+  }
+
+  public static ActorChainPrincipal getActorChainPrincipal(Subject subject) {
+    if (subject == null) {
+      return null;
+    }
+    final Set<ActorChainPrincipal> principals = subject.getPrincipals(ActorChainPrincipal.class);
+    return principals.isEmpty() ? null : principals.iterator().next();
+  }
+
+  public static String renderActorChain(List<Map<String, Object>> actorChain) {
+    if (actorChain == null || actorChain.isEmpty()) {
+      return "";
+    }
+    final StringBuilder sb = new StringBuilder();
+    for (Map<String, Object> actor : actorChain) {
+      if (sb.length() > 0) {
+        sb.append("<-");
+      }
+      final Object iss = actor.get("iss");
+      if (iss != null) {
+        sb.append(iss).append('/');
+      }
+      final Object sub = actor.get("sub");
+      sb.append(sub == null ? "" : sub.toString());
+    }
+    return sb.toString();
+  }
+
+  public static String renderActorChain(ActorChainPrincipal principal) {
+    return principal == null ? "" : renderActorChain(principal.getActorChain());
   }
 
   /**

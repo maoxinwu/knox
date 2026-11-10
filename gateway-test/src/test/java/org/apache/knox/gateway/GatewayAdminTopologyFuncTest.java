@@ -30,7 +30,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import javax.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.MediaType;
 
 import io.restassured.http.ContentType;
 import com.mycila.xmltool.XMLDoc;
@@ -952,6 +952,62 @@ public class GatewayAdminTopologyFuncTest {
   }
 
   @Test( timeout = TestUtils.LONG_TIMEOUT )
+  public void testPutServiceDefinitionWithEntityInjection() throws Exception {
+    LOG_ENTER();
+
+    final String username = "admin";
+    final String password = "admin-password";
+
+    final String name = "xxetest";
+    final String role = "XXETEST";
+    final String version = "1.0.0";
+
+    final String canary = "XXE-LEAK-CANARY-" + UUID.randomUUID();
+    final File secret = File.createTempFile("knox-xxe-secret", ".txt");
+    Files.write(secret.toPath(), canary.getBytes(StandardCharsets.UTF_8));
+
+    final String XML_WITH_INJECTION =
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" +
+        "<!DOCTYPE foo [<!ENTITY xxeinj SYSTEM \"file://" + secret.getAbsolutePath() + "\"> ]>\n" +
+        "<serviceDefinition>\n" +
+        "    <service name=\"" + name + "\" role=\"" + role + "\" version=\"" + version + "\">\n" +
+        "        <routes>\n" +
+        "            <route path=\"/xxetest/?**\"/>\n" +
+        "        </routes>\n" +
+        "        <testURLs>\n" +
+        "            <testURL>&xxeinj;</testURL>\n" +
+        "        </testURLs>\n" +
+        "    </service>\n" +
+        "</serviceDefinition>";
+
+    final String putUrl = clusterUrl + "/api/v1/servicedefinitions";
+    final String getUrl = clusterUrl + "/api/v1/servicedefinitions/" + name + "/" + role + "/" + version;
+
+    try {
+      given().auth().preemptive().basic(username, password)
+             .contentType(MediaType.APPLICATION_XML)
+             .body(XML_WITH_INJECTION)
+             .then()
+             .statusCode(HttpStatus.SC_CREATED)
+             .when().put(putUrl);
+
+      String getResponse = given().auth().preemptive().basic(username, password)
+             .header("Accept", MediaType.APPLICATION_XML)
+             .then()
+             .statusCode(HttpStatus.SC_OK)
+             .when().get(getUrl).getBody().asString();
+
+      assertThat(getResponse, not(containsString(canary)));
+    } finally {
+      given().auth().preemptive().basic(username, password)
+             .when().delete(getUrl);
+      Files.deleteIfExists(secret.toPath());
+    }
+
+    LOG_EXIT();
+  }
+
+  @Test( timeout = TestUtils.LONG_TIMEOUT )
   public void testXForwardedHeaders() {
     LOG_ENTER();
 
@@ -1806,7 +1862,8 @@ public class GatewayAdminTopologyFuncTest {
     String newDescriptorJSON = createDescriptor(clusterName);
 
     // Attempt to PUT the descriptor
-    given().auth().preemptive().basic(username, password)
+    given().urlEncodingEnabled(false)
+           .auth().preemptive().basic(username, password)
            .header("Content-type", MediaType.APPLICATION_JSON)
            .body(newDescriptorJSON.getBytes(StandardCharsets.UTF_8.name()))
            .then()

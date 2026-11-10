@@ -52,7 +52,7 @@ import org.apache.knox.gateway.dto.HomePageProfile;
 import org.apache.knox.gateway.fips.FipsUtils;
 import org.apache.knox.gateway.i18n.messages.MessagesFactory;
 import org.apache.knox.gateway.services.security.impl.ZookeeperRemoteAliasService;
-import org.eclipse.jetty.server.handler.ContextHandler;
+import org.eclipse.jetty.ee10.servlet.ServletContextHandler;
 import org.joda.time.Period;
 import org.joda.time.format.PeriodFormatter;
 import org.joda.time.format.PeriodFormatterBuilder;
@@ -95,6 +95,8 @@ public class GatewayConfigImpl extends Configuration implements GatewayConfig {
   private static final String GATEWAY_DEFAULT_TOPOLOGY_NAME = "homepage";
 
   private static final GatewayMessages log = MessagesFactory.get( GatewayMessages.class );
+
+  private final Set<String> registeredConfigFiles = new HashSet<>();
 
   private static final String GATEWAY_CONFIG_DIR_PREFIX = "conf";
 
@@ -354,6 +356,9 @@ public class GatewayConfigImpl extends Configuration implements GatewayConfig {
   private static final String GATEWAY_DATABASE_VERIFY_SERVER_CERT =  GATEWAY_CONFIG_FILE_PREFIX + ".database.ssl.verify.server.cert";
   private static final String GATEWAY_DATABASE_TRUSTSTORE_FILE =  GATEWAY_CONFIG_FILE_PREFIX + ".database.ssl.truststore.file";
   private static final String GATEWAY_DATABASE_SSL_TRUSTSTORE_TYPE =  GATEWAY_CONFIG_FILE_PREFIX + ".database.ssl.truststore.type";
+  private static final String GATEWAY_DATABASE_H2_ENCRYPTION_ENABLED = GATEWAY_CONFIG_FILE_PREFIX + ".database.h2.encryption.enabled";
+  private static final String GATEWAY_DATABASE_H2_ENCRYPTION_PASSPHRASE_ALIAS = GATEWAY_CONFIG_FILE_PREFIX + ".database.h2.encryption.passphrase.alias";
+  private static final String DEFAULT_GATEWAY_DATABASE_H2_ENCRYPTION_PASSPHRASE_ALIAS = "h2_encryption_passphrase";
 
   // Concurrent session properties
   private static final String GATEWAY_SESSION_VERIFICATION_PREFIX = GATEWAY_CONFIG_FILE_PREFIX + ".session.verification";
@@ -398,6 +403,9 @@ public class GatewayConfigImpl extends Configuration implements GatewayConfig {
   public static final int DEFAULT_LDAP_MAX_SIZE_LIMIT = 1000;
   /* The default max time for LDAP search in milliseconds */
   public static final int DEFAULT_LDAP_MAX_TIME_LIMIT = 60 * 1000;
+  public static final boolean DEFAULT_LDAP_DN_MAPPING_ENABLED = true;
+  public static final int DEFAULT_LDAP_BACKEND_PASSWORD_ALIAS_RETRY_ATTEMPTS = 0;
+  public static final int DEFAULT_LDAP_BACKEND_PASSWORD_ALIAS_RETRY_INTERVAL_MS = 1000;
 
   public GatewayConfigImpl() {
     init();
@@ -559,6 +567,7 @@ public class GatewayConfigImpl extends Configuration implements GatewayConfig {
         try {
           url = f.toURI().toURL();
           addResource( new Path( path ) );
+          registeredConfigFiles.add( path );
           log.loadingConfigurationFile( path );
         } catch ( MalformedURLException e ) {
           log.failedToLoadConfig( path, e );
@@ -566,6 +575,14 @@ public class GatewayConfigImpl extends Configuration implements GatewayConfig {
       }
     }
     return url;
+  }
+
+  public synchronized void addConfigFileIfAbsent( File file ) {
+    String path = file.getAbsolutePath();
+    if( file.exists() && registeredConfigFiles.add( path ) ) {
+      addResource( new Path( path ) );
+      log.loadingConfigurationFile( path );
+    }
   }
 
   private URL loadConfigResource( String file ) {
@@ -1015,6 +1032,25 @@ public class GatewayConfigImpl extends Configuration implements GatewayConfig {
     } else {
       return get(SIGNING_KEY_PASSPHRASE_ALIAS, DEFAULT_SIGNING_KEY_PASSPHRASE_ALIAS);
     }
+  }
+
+  @Override
+  public List<String> getSigningKeyAliases() {
+    final List<String> aliases = new ArrayList<>();
+    final String current = getSigningKeyAlias();
+    if (current != null) {
+      aliases.add(current);
+    }
+    final String additional = get(SIGNING_KEY_ALIASES_ADDITIONAL);
+    if (additional != null && !additional.trim().isEmpty() && !"none".equalsIgnoreCase(additional.trim())) {
+      for (String alias : additional.trim().split("\\s*,\\s*")) {
+        // Skip blanks and de-duplicate so the current key is never published/checked twice.
+        if (!alias.isEmpty() && !aliases.contains(alias)) {
+          aliases.add(alias);
+        }
+      }
+    }
+    return aliases;
   }
 
   @Override
@@ -1590,13 +1626,23 @@ public class GatewayConfigImpl extends Configuration implements GatewayConfig {
   }
 
   @Override
+  public boolean isDatabaseH2EncryptionEnabled() {
+    return getBoolean(GATEWAY_DATABASE_H2_ENCRYPTION_ENABLED, false);
+  }
+
+  @Override
+  public String getDatabaseH2EncryptionPassphraseAlias() {
+    return get(GATEWAY_DATABASE_H2_ENCRYPTION_PASSPHRASE_ALIAS, DEFAULT_GATEWAY_DATABASE_H2_ENCRYPTION_PASSPHRASE_ALIAS);
+  }
+
+  @Override
   public int getJettyMaxFormContentSize() {
-    return getInt(JETTY_MAX_FORM_CONTENT_SIZE, ContextHandler.DEFAULT_MAX_FORM_CONTENT_SIZE);
+    return getInt(JETTY_MAX_FORM_CONTENT_SIZE, ServletContextHandler.DEFAULT_MAX_FORM_CONTENT_SIZE);
   }
 
   @Override
   public int getJettyMaxFormKeys() {
-    return getInt(JETTY_MAX_FORM_KEYS, ContextHandler.DEFAULT_MAX_FORM_KEYS);
+    return getInt(JETTY_MAX_FORM_KEYS, ServletContextHandler.DEFAULT_MAX_FORM_KEYS);
   }
 
   @Override
@@ -1866,6 +1912,16 @@ public class GatewayConfigImpl extends Configuration implements GatewayConfig {
   }
 
   @Override
+  public String getLdapRolesListRestApiEndpoint() {
+    return get(LDAP_ROLES_LIST_REST_API_ENDPOINT);
+  }
+
+  @Override
+  public String getLdapRolesGetRestApiEndpoint() {
+    return get(LDAP_ROLES_GET_REST_API_ENDPOINT);
+  }
+
+  @Override
   public String getLdapRolesLookupFilePath() {
     return get(LDAP_ROLES_LOOKUP_FILE_PATH);
   }
@@ -1902,7 +1958,77 @@ public class GatewayConfigImpl extends Configuration implements GatewayConfig {
   }
 
   @Override
+  public boolean getLDAPDnMappingEnabled() {
+    return getBoolean(LDAP_DN_MAPPING_ENABLED, DEFAULT_LDAP_DN_MAPPING_ENABLED);
+  }
+
+  @Override
+  public int getLDAPBackendPasswordAliasRetryAttempts() {
+    return getInt(LDAP_BACKEND_PASSWORD_ALIAS_RETRY_ATTEMPTS, DEFAULT_LDAP_BACKEND_PASSWORD_ALIAS_RETRY_ATTEMPTS);
+  }
+
+  @Override
+  public int getLDAPBackendPasswordAliasRetryIntervalMs() {
+    return getInt(LDAP_BACKEND_PASSWORD_ALIAS_RETRY_INTERVAL_MS, DEFAULT_LDAP_BACKEND_PASSWORD_ALIAS_RETRY_INTERVAL_MS);
+  }
+
+  @Override
   public boolean getGroupUIServicesOnHomepage() {
     return getBoolean(KNOX_HOMEPAGE_GROUP_UI_SERVICES, DEFAULT_GROUP_UI_SERVICES);
+  }
+
+  @Override
+  public int getTrustedOidcIssuerMaxTrustedIssuers() {
+    return getInt(TRUSTED_OIDC_ISSUER_MAX_TRUSTED_ISSUERS, TRUSTED_OIDC_ISSUER_MAX_TRUSTED_ISSUERS_DEFAULT);
+  }
+
+  @Override
+  public int getTrustedOidcIssuerRegistryCacheTtlSecs() {
+    return getInt(TRUSTED_OIDC_ISSUER_REGISTRY_CACHE_TTL_SECS, TRUSTED_OIDC_ISSUER_REGISTRY_CACHE_TTL_SECS_DEFAULT);
+  }
+
+  @Override
+  public int getTrustedOidcIssuerDiscoveryCacheTtlSecs() {
+    return getInt(TRUSTED_OIDC_ISSUER_DISCOVERY_CACHE_TTL_SECS, TRUSTED_OIDC_ISSUER_DISCOVERY_CACHE_TTL_SECS_DEFAULT);
+  }
+
+  @Override
+  public int getTrustedOidcIssuerDiscoveryConnectTimeoutMs() {
+    return getInt(TRUSTED_OIDC_ISSUER_DISCOVERY_CONNECT_TIMEOUT_MS, TRUSTED_OIDC_ISSUER_DISCOVERY_CONNECT_TIMEOUT_MS_DEFAULT);
+  }
+
+  @Override
+  public int getTrustedOidcIssuerDiscoveryReadTimeoutMs() {
+    return getInt(TRUSTED_OIDC_ISSUER_DISCOVERY_READ_TIMEOUT_MS, TRUSTED_OIDC_ISSUER_DISCOVERY_READ_TIMEOUT_MS_DEFAULT);
+  }
+
+  @Override
+  public int getTrustedOidcIssuerCaSecretMaxAgeSecs() {
+    return getInt(TRUSTED_OIDC_ISSUER_CA_SECRET_MAX_AGE_SECS, TRUSTED_OIDC_ISSUER_CA_SECRET_MAX_AGE_SECS_DEFAULT);
+  }
+
+  @Override
+  public int getKnoxIDFFederatedOpConnectTimeoutMs() {
+    return getInt(KNOXIDF_FEDERATED_OP_CONNECT_TIMEOUT_MS, KNOXIDF_FEDERATED_OP_CONNECT_TIMEOUT_MS_DEFAULT);
+  }
+
+  @Override
+  public int getKnoxIDFFederatedOpReadTimeoutMs() {
+    return getInt(KNOXIDF_FEDERATED_OP_READ_TIMEOUT_MS, KNOXIDF_FEDERATED_OP_READ_TIMEOUT_MS_DEFAULT);
+  }
+
+  @Override
+  public int getDelegationServiceTokenTtlSec() {
+    return getInt(DELEGATION_SERVICE_TOKEN_TTL_SEC, DELEGATION_SERVICE_TOKEN_TTL_SEC_DEFAULT);
+  }
+
+  @Override
+  public int getDelegationServiceListMaxTotal() {
+    return getInt(DELEGATION_SERVICE_LIST_MAX_TOTAL, DELEGATION_SERVICE_LIST_MAX_TOTAL_DEFAULT);
+  }
+
+  @Override
+  public int getDelegationServiceListMaxPerAuthority() {
+    return getInt(DELEGATION_SERVICE_LIST_MAX_PER_AUTHORITY, DELEGATION_SERVICE_LIST_MAX_PER_AUTHORITY_DEFAULT);
   }
 }

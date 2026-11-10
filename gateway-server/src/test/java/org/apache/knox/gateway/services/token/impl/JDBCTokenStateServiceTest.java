@@ -25,6 +25,7 @@ import org.apache.knox.gateway.database.AbstractDataSourceFactory;
 import org.apache.knox.gateway.database.DatabaseType;
 import org.apache.knox.gateway.services.security.AliasService;
 import org.apache.knox.gateway.services.security.token.KnoxToken;
+import org.apache.knox.gateway.services.security.token.TokenAlreadyExistsException;
 import org.apache.knox.gateway.services.security.token.TokenMetadata;
 import org.apache.knox.gateway.services.security.token.UnknownTokenException;
 import org.apache.knox.gateway.services.security.token.impl.TokenMAC;
@@ -53,6 +54,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 public class JDBCTokenStateServiceTest {
@@ -65,8 +67,10 @@ public class JDBCTokenStateServiceTest {
 
   @ClassRule
   public static final TemporaryFolder testFolder = new TemporaryFolder();
-  public static final String CONNECTION_URL = "jdbc:hsqldb:mem:knox;ifexists=false";
-  public static final String DB_NAME = "knox";
+  public static final String CONNECTION_URL = "jdbc:h2:mem:knox;DB_CLOSE_DELAY=-1";
+  // H2DataSourceFactory builds the URL as "jdbc:h2:" + getDatabaseName(), so the database name
+  // carries the in-memory location and flags to produce the same URL the test opens directly above.
+  public static final String DB_NAME = "mem:knox;DB_CLOSE_DELAY=-1";
   private static JDBCTokenStateService jdbcTokenStateService;
   private static TokenMAC tokenMAC;
 
@@ -74,7 +78,7 @@ public class JDBCTokenStateServiceTest {
   @BeforeClass
   public static void setUp() throws Exception {
     final GatewayConfig gatewayConfig = EasyMock.createNiceMock(GatewayConfig.class);
-    EasyMock.expect(gatewayConfig.getDatabaseType()).andReturn(DatabaseType.HSQL.type()).anyTimes();
+    EasyMock.expect(gatewayConfig.getDatabaseType()).andReturn(DatabaseType.H2.type()).anyTimes();
     EasyMock.expect(gatewayConfig.getDatabaseConnectionUrl()).andReturn(CONNECTION_URL).anyTimes();
     EasyMock.expect(gatewayConfig.getDatabaseName()).andReturn(DB_NAME).anyTimes();
     final AliasService aliasService = EasyMock.createNiceMock(AliasService.class);
@@ -109,6 +113,23 @@ public class JDBCTokenStateServiceTest {
 
     assertEquals(expiration, getLongTokenAttributeFromDatabase(tokenId, TokenStateDatabase.GET_TOKEN_EXPIRATION_SQL));
     assertEquals(issueTime + maxLifetimeDuration, getLongTokenAttributeFromDatabase(tokenId, TokenStateDatabase.GET_MAX_LIFETIME_SQL));
+  }
+
+  @Test
+  public void testAddDuplicateTokenIdThrowsTokenAlreadyExists() throws Exception {
+    truncateDatabase();
+    // A second insert of the same token_id must surface the unique-constraint violation as
+    // TokenAlreadyExistsException rather than overwriting or failing generically.
+    final String tokenId = "duplicate-client-id";
+    final long issueTime = System.currentTimeMillis();
+    jdbcTokenStateService.addToken(tokenId, issueTime, issueTime + 1000, 1000);
+
+    assertThrows(TokenAlreadyExistsException.class,
+        () -> jdbcTokenStateService.addToken(tokenId, issueTime, issueTime + 2000, 2000));
+
+    // Exactly one row survives, and its state is that of the original (winning) insert.
+    assertEquals(1, getLongTokenAttributeFromDatabase(null, GET_TOKENS_COUNT_SQL));
+    assertEquals(issueTime + 1000, jdbcTokenStateService.getTokenExpiration(tokenId));
   }
 
   @Test

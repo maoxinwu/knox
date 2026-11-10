@@ -42,6 +42,7 @@ import org.apache.knox.gateway.config.GatewayConfig;
 import org.apache.knox.gateway.i18n.messages.MessagesFactory;
 import org.apache.knox.gateway.services.ServiceLifecycleException;
 import org.apache.knox.gateway.services.security.token.KnoxToken;
+import org.apache.knox.gateway.services.security.token.TokenAlreadyExistsException;
 import org.apache.knox.gateway.services.security.token.TokenMetadata;
 import org.apache.knox.gateway.services.security.token.TokenStateService;
 import org.apache.knox.gateway.services.security.token.TokenUtils;
@@ -145,6 +146,11 @@ public class DefaultTokenStateService implements TokenStateService {
                              long   expiration,
                              long   maxLifetimeDuration) {
     validateTokenIdentifier(tokenId);
+    // Best-effort duplicate rejection on the in-memory path (the KNOX_TOKENS.token_id primary key
+    // is the authoritative guarantee on the persistent path; see JDBCTokenStateService).
+    if (tokenExpirations.containsKey(tokenId)) {
+      throw new TokenAlreadyExistsException("A token with id " + Tokens.getTokenIDDisplayText(tokenId) + " already exists");
+    }
     setIssueTime(tokenId, issueTime);
     tokenExpirations.put(tokenId, expiration);
     setMaxLifetime(tokenId, issueTime, maxLifetimeDuration);
@@ -263,6 +269,22 @@ public class DefaultTokenStateService implements TokenStateService {
     /* no reason to keep revoked tokens around */
     removeToken(tokenId);
     log.revokedToken(Tokens.getTokenIDDisplayText(tokenId));
+  }
+
+  @Override
+  public boolean consumeToken(final String tokenId) {
+    validateTokenIdentifier(tokenId);
+    // Atomic single-use claim: ConcurrentHashMap#remove returns the prior value to exactly one
+    // caller, so concurrent redemptions of the same token can never both observe it as present.
+    final boolean claimed = tokenExpirations.remove(tokenId) != null;
+    if (claimed) {
+      // Evict the remaining per-token state (idempotent for a token we won the race for).
+      tokenIssueTimes.remove(tokenId);
+      maxTokenLifetimes.remove(tokenId);
+      metadataMap.remove(tokenId);
+      log.revokedToken(Tokens.getTokenIDDisplayText(tokenId));
+    }
+    return claimed;
   }
 
   @Override

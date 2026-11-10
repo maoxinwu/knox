@@ -24,13 +24,14 @@ import {Resource} from '../model/resource';
 import {ResourceTypesService} from '../service/resourcetypes.service';
 import {ValidationUtils} from '../utils/validation-utils';
 import {ModalComponent} from '../utils/modal.component';
+import {KxIconComponent} from '../shared/icon/icon.component';
 import { HttpErrorResponse } from '@angular/common/http';
 
 @Component({
     selector: 'app-new-desc-wizard',
     templateUrl: './new-desc-wizard.component.html',
     styleUrls: ['./new-desc-wizard.component.css'],
-    imports: [FormsModule, ProviderConfigSelectorComponent, ModalComponent]
+    imports: [FormsModule, ProviderConfigSelectorComponent, ModalComponent, KxIconComponent]
 })
 export class NewDescWizardComponent implements OnInit {
 
@@ -57,6 +58,8 @@ export class NewDescWizardComponent implements OnInit {
         'KNOXSSO',
         'KNOXTOKEN',
         'LIVYSERVER',
+        'LIVY_FOR_SPARK3',
+        'LIVY_FOR_SPARK4',
         'LOGSEARCH',
         'NAMENODE',
         'NIFI',
@@ -69,6 +72,7 @@ export class NewDescWizardComponent implements OnInit {
         'SOLR',
         'SPARKHISTORYUI',
         'SPARK3HISTORYUI',
+        'SPARK4HISTORYUI',
         'STORM',
         'STORM-LOGVIEWER',
         'SUPERSET',

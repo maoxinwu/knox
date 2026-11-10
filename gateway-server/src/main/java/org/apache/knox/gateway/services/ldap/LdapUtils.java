@@ -18,11 +18,61 @@ package org.apache.knox.gateway.services.ldap;
 
 import org.apache.directory.api.ldap.model.entry.Attribute;
 import org.apache.directory.api.ldap.model.entry.Entry;
+import org.apache.directory.api.ldap.model.entry.Value;
 import org.apache.directory.api.ldap.model.exception.LdapException;
+import org.apache.directory.api.ldap.model.filter.AndNode;
+import org.apache.directory.api.ldap.model.filter.EqualityNode;
+import org.apache.directory.api.ldap.model.filter.ExprNode;
+import org.apache.directory.api.ldap.model.filter.NotNode;
+import org.apache.directory.api.ldap.model.filter.ObjectClassNode;
+import org.apache.directory.api.ldap.model.filter.OrNode;
+import org.apache.directory.api.ldap.model.filter.PresenceNode;
+import org.apache.directory.api.ldap.model.filter.SubstringNode;
 import org.apache.directory.api.ldap.model.name.Dn;
 import org.apache.directory.api.ldap.model.name.Rdn;
+import org.apache.directory.api.ldap.model.schema.AttributeType;
+import org.apache.directory.api.ldap.model.schema.SchemaManager;
+
+import java.util.Locale;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 public class LdapUtils {
+    // Attributes whose values are distinguished names and therefore need remote->proxy
+    // DN rewriting. Other attribute values (mail, description, ...) are copied verbatim.
+    public static final String DISTINGUISHED_NAME_SYNTAX_OID = "1.3.6.1.4.1.1466.115.121.1.12";
+    public static final Set<String> DN_VALUED_ATTRIBUTES = Set.of(
+            "member", "uniquemember", "memberof", "manager", "owner", "seealso");
+
+    public static boolean isGroupEntry(Entry entry) throws LdapException {
+        final Attribute objectClass = entry.get("objectClass");
+        if (objectClass == null) {
+            return false;
+        }
+        for (Value value : objectClass) {
+            final String objectClassName = value.getString();
+            if ("groupOfNames".equalsIgnoreCase(objectClassName) || "groupOfUniqueNames".equalsIgnoreCase(objectClassName)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static boolean isUserEntry(Entry entry) throws LdapException {
+        final Attribute objectClass = entry.get("objectClass");
+        if (objectClass == null) {
+            return false;
+        }
+        for (Value value : objectClass) {
+            final String objectClassName = value.getString();
+            if ("inetOrgPerson".equalsIgnoreCase(objectClassName)
+                    || "person".equalsIgnoreCase(objectClassName)
+                    || "organizationalPerson".equalsIgnoreCase(objectClassName)) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     public static String extractUsernameFromDn(Dn dn) {
         if (dn == null || dn.isEmpty()) {
@@ -63,5 +113,106 @@ public class LdapUtils {
             }
         }
         return null;
+    }
+
+    /**
+     * Returns whether an entry matches a search filter. Supports the and, or, not, presence, equality
+     * and substring assertions; any other assertion (ordering, extensible match) does not match.
+     *
+     * @param entry the entry to check
+     * @param filter the search filter
+     * @return true if the entry matches the filter
+     * @throws LdapException if a value of the entry cannot be read
+     */
+    public static boolean matchesFilter(Entry entry, ExprNode filter) throws LdapException {
+        if (filter instanceof ObjectClassNode) {
+            return true;
+        }
+        if (filter instanceof AndNode) {
+            for (ExprNode child : ((AndNode) filter).getChildren()) {
+                if (!matchesFilter(entry, child)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if (filter instanceof OrNode) {
+            for (ExprNode child : ((OrNode) filter).getChildren()) {
+                if (matchesFilter(entry, child)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (filter instanceof NotNode) {
+            return !matchesFilter(entry, ((NotNode) filter).getFirstChild());
+        }
+        if (filter instanceof PresenceNode) {
+            final PresenceNode presence = (PresenceNode) filter;
+            return presence.getAttributeType() != null
+                    ? entry.containsAttribute(presence.getAttributeType())
+                    : entry.containsAttribute(presence.getAttribute());
+        }
+        if (filter instanceof EqualityNode) {
+            final EqualityNode<?> equality = (EqualityNode<?>) filter;
+            return equality.getAttributeType() != null
+                    ? entry.contains(equality.getAttributeType(), equality.getValue())
+                    : entry.contains(equality.getAttribute(), equality.getValue());
+        }
+        if (filter instanceof SubstringNode) {
+            return matchesSubstring(entry, (SubstringNode) filter);
+        }
+        return false;
+    }
+
+    private static boolean matchesSubstring(Entry entry, SubstringNode substring) throws LdapException {
+        final Attribute attribute = substring.getAttributeType() != null
+                ? entry.get(substring.getAttributeType())
+                : entry.get(substring.getAttribute());
+        if (attribute == null) {
+            return false;
+        }
+        final StringBuilder regex = new StringBuilder();
+        if (substring.getInitial() != null) {
+            regex.append(Pattern.quote(substring.getInitial()));
+        }
+        regex.append(".*");
+        if (substring.getAny() != null) {
+            for (String any : substring.getAny()) {
+                regex.append(Pattern.quote(any)).append(".*");
+            }
+        }
+        if (substring.getFinal() != null) {
+            regex.append(Pattern.quote(substring.getFinal()));
+        }
+        final Pattern pattern = Pattern.compile(regex.toString(), Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE | Pattern.DOTALL);
+        for (Value value : attribute) {
+            if (value.getString() != null && pattern.matcher(value.getString()).matches()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Returns whether the attribute is DN-valued.
+     *
+     * @param attributeName the name of the attribute
+     * @param schemaManager the schema manager
+     * @return true if the attribute is DN-valued
+     */
+    public static boolean isDnValued(String attributeName, SchemaManager schemaManager) {
+        return DN_VALUED_ATTRIBUTES.contains(attributeName.toLowerCase(Locale.ROOT)) ||
+                isDnValued(schemaManager.getAttributeType(attributeName));
+    }
+
+    /**
+     * Returns whether the attribute type is DN-valued.
+     *
+     * @param attributeType the attribute type
+     * @return true if the attribute is DN-valued
+     */
+    public static boolean isDnValued(AttributeType attributeType) {
+        return attributeType != null && DISTINGUISHED_NAME_SYNTAX_OID.equalsIgnoreCase(attributeType.getSyntaxOid());
     }
 }

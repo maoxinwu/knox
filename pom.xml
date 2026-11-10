@@ -27,7 +27,7 @@
 
     <groupId>org.apache.knox</groupId>
     <artifactId>gateway</artifactId>
-    <version>3.0.0-SNAPSHOT</version>
+    <version>3.1.0-SNAPSHOT</version>
     <packaging>pom</packaging>
 
     <name>gateway</name>
@@ -149,6 +149,7 @@
         <module>gateway-service-metadata</module>
         <module>gateway-service-session</module>
         <module>gateway-openapi-ui</module>
+        <module>gateway-service-knoxidf</module>
     </modules>
 
     <properties>
@@ -163,11 +164,12 @@
         <apacheds-jdbm.version>2.0.0-M5</apacheds-jdbm.version>
         <apache-rat-plugin.version>0.13</apache-rat-plugin.version>
         <ant-nodeps.version>1.8.1</ant-nodeps.version>
-        <asm.version>9.0</asm.version>
-        <aspectj.version>1.9.6</aspectj.version>
+        <asm.version>9.9.1</asm.version>
+        <aspectj.version>1.9.25.1</aspectj.version>
         <asynchttpclient.version>4.1.5</asynchttpclient.version>
-        <bcprov-jdk18on.version>1.84</bcprov-jdk18on.version>
-        <bcpkix-jdk18on.version>1.84</bcpkix-jdk18on.version>
+        <bcprov-jdk18on.version>1.85</bcprov-jdk18on.version>
+        <bcpkix-jdk18on.version>1.85</bcpkix-jdk18on.version>
+        <bcutil-jdk18on.version>1.85</bcutil-jdk18on.version>
         <ben-manes.caffeine.version>2.8.8</ben-manes.caffeine.version>
         <buildnumber-maven-plugin.version>1.4</buildnumber-maven-plugin.version>
         <cglib.version>3.3.0</cglib.version>
@@ -193,14 +195,15 @@
         <cryptacular.version>1.3.0</cryptacular.version>
         <curator.version>5.4.0</curator.version>
         <dependency-check-maven.version>6.0.3</dependency-check-maven.version>
-        <derby.db.version>10.14.2.0</derby.db.version> <!-- 10.15.1.3 requires Java 9 -->
-        <hsql.db.version>2.7.1</hsql.db.version>
+        <!-- Embedded, zero-config OOTB JDBC backend (KNOX-3401). Cat B (MPL-2.0/EPL-1.0):
+             bundled as a binary jar only, never vendored into source releases. 2.5.250 pending on Central. -->
+        <h2.db.version>2.4.240</h2.db.version>
         <dockerfile-maven-plugin.version>1.4.13</dockerfile-maven-plugin.version>
         <dom4j.version>2.1.3</dom4j.version>
         <easymock.version>5.2.0</easymock.version>
         <eclipselink.version>2.7.8</eclipselink.version>
-        <ehcache.version>3.3.1</ehcache.version>
-        <error_prone_annotations.version>2.41.0</error_prone_annotations.version>
+        <ehcache.version>3.10.9</ehcache.version>
+        <error_prone_annotations.version>2.50.0</error_prone_annotations.version>
         <exec-maven-plugin.version>3.0.0</exec-maven-plugin.version>
         <fastinfoset.version>1.2.18</fastinfoset.version>
         <forbiddenapis.version>3.9</forbiddenapis.version>
@@ -211,76 +214,76 @@
         <glassfish-jaxb.version>4.0.5</glassfish-jaxb.version>
         <gson.version>2.10.1</gson.version>
         <gsonfire.version>1.9.0</gsonfire.version>
-        <groovy.version>4.0.29</groovy.version>
-        <guava.version>32.1.3-jre</guava.version>
+        <groovy.version>5.0.4</groovy.version>
+        <guava.version>33.7.2-jre</guava.version>
         <hadoop.version>3.4.1</hadoop.version>
         <hamcrest.version>2.2</hamcrest.version>
         <hamcrest-json.version>0.2</hamcrest-json.version>
         <httpclient.version>4.5.13</httpclient.version>
-        <httpclient5.version>5.4.3</httpclient5.version>
+        <httpclient5.version>5.6.3</httpclient5.version>
         <httpcore.version>4.4.14</httpcore.version>
-        <httpcore5.version>5.3.6</httpcore5.version>
-        <jackson.version>2.18.9</jackson.version>
+        <httpcore5.version>5.4.3</httpcore5.version>
+        <jackson.version>2.21.4</jackson.version>
         <jacoco-maven-plugin.version>0.8.13</jacoco-maven-plugin.version>
-        <jansi.version>1.18</jansi.version>
-        <jakarta.activation-api.version>1.2.1</jakarta.activation-api.version>
+        <jakarta.activation-api.version>2.1.4</jakarta.activation-api.version>
         <com.sun.activation.version>1.2.2</com.sun.activation.version>
-        <javax.annotation-api.version>1.3.2</javax.annotation-api.version>
         <javax.inject.version>2.4.0</javax.inject.version>
+        <jakarta.inject-api.version>2.0.1</jakarta.inject-api.version>
         <javax.json.version>1.1.3</javax.json.version>
-        <javax.servlet-api.version>3.1.0</javax.servlet-api.version>
-        <javax.ws.rs-api.version>2.0</javax.ws.rs-api.version>
-        <javax.websocket-api.version>1.1</javax.websocket-api.version>
+        <jakarta.servlet-api.version>6.0.0</jakarta.servlet-api.version>
+        <jakarta.ws.rs-api.version>3.1.0</jakarta.ws.rs-api.version>
+        <jakarta.el-api.version>5.0.1</jakarta.el-api.version>
+        <jakarta.websocket-api.version>2.1.1</jakarta.websocket-api.version>
         <jaxws-ri.version>2.3.3</jaxws-ri.version>
         <java-support.version>8.3.1</java-support.version>
         <javassist.version>3.27.0-GA</javassist.version>
         <jboss-logging.version>3.4.1.Final</jboss-logging.version>
-        <jee-pac4j.version>8.0.3</jee-pac4j.version>
         <jericho-html.version>3.4</jericho-html.version>
-        <jersey.version>2.47</jersey.version>
-        <jetty.version>9.4.57.v20241219</jetty.version>
-        <jline.version>3.21.0</jline.version>
-        <jna.version>5.9.0</jna.version>
+        <jersey.version>3.1.12</jersey.version>
+        <jetty.version>12.0.38</jetty.version>
+        <jline.version>3.30.17</jline.version>
+        <jna.version>5.18.1</jna.version>
         <joda-time.version>2.10.8</joda-time.version>
         <json-path.version>2.9.0</json-path.version>
         <json-smart.version>2.5.2</json-smart.version>
-        <jakarta.annotation-api.version>1.3.4</jakarta.annotation-api.version>
+        <jakarta.annotation-api.version>2.1.1</jakarta.annotation-api.version>
         <junit.version>4.13.2</junit.version>
         <kotlin-stdlib.version>1.9.10</kotlin-stdlib.version>
         <libpam4j.version>1.11</libpam4j.version>
-        <log4j2.version>2.26.0</log4j2.version>
+        <log4j2.version>2.26.1</log4j2.version>
         <maven-checkstyle-plugin.version>3.1.1</maven-checkstyle-plugin.version>
         <maven-compiler-plugin.version>3.8.1</maven-compiler-plugin.version>
         <maven-dependency-plugin.version>3.6.1</maven-dependency-plugin.version>
         <maven-enforcer-plugin.version>3.0.0-M3</maven-enforcer-plugin.version>
         <maven-pmd-plugin.version>3.28.0</maven-pmd-plugin.version>
-        <metrics.version>4.1.16</metrics.version>
+        <metrics.version>4.2.40</metrics.version>
         <mina.version>2.2.8</mina.version>
-        <netty.version>4.1.135.Final</netty.version>
+        <netty.version>4.1.137.Final</netty.version>
         <nimbus-jose-jwt.version>10.9.1</nimbus-jose-jwt.version>
         <nodejs.version>v22.20.0</nodejs.version>
+        <oauth2-oidc-sdk.version>11.37.2</oauth2-oidc-sdk.version>
         <okhttp.version>4.12.0</okhttp.version>
         <opensaml.version>5.2.2</opensaml.version>
         <pac4j.version>6.5.3</pac4j.version>
+        <jee-pac4j.version>8.0.3</jee-pac4j.version>
         <postgresql.version>42.7.12</postgresql.version>
         <mysql.version>8.0.28</mysql.version>
-        <mariadb.connector.version>3.3.0</mariadb.connector.version>
+        <mariadb.connector.version>3.3.7</mariadb.connector.version>
         <okio.version>3.6.0</okio.version>
         <oracle.version>23.26.0.0.0</oracle.version>
         <protobuf.version>3.25.8</protobuf.version>
         <powermock.version>2.0.9</powermock.version>
         <purejavacomm.version>0.0.11.1</purejavacomm.version>
         <pty4j.version>0.12.4</pty4j.version>
-        <rest-assured.version>5.5.6</rest-assured.version>
-        <shiro.version>1.13.0</shiro.version>
-        <shiro-ehcache3.version>1.13.0</shiro-ehcache3.version>
+        <rest-assured.version>6.0.0</rest-assured.version>
+        <shiro.version>2.2.1</shiro.version>
         <shrinkwrap.version>1.2.6</shrinkwrap.version>
         <shrinkwrap.descriptors.version>2.0.0</shrinkwrap.descriptors.version>
         <slf4j.version>2.0.13</slf4j.version>
         <spotbugs.version>4.9.3</spotbugs.version>
         <spotbugs-maven-plugin.version>4.9.3.0</spotbugs-maven-plugin.version>
-        <spring.version>6.2.11</spring.version>
-        <spring-vault.version>3.2.0</spring-vault.version>
+        <spring.version>7.0.10</spring.version>
+        <spring-vault.version>4.1.1</spring-vault.version>
         <stax-ex.version>1.8.3</stax-ex.version>
         <stax2-api.version>4.2.1</stax2-api.version>
         <system-stubs-junit4.version>1.1.0</system-stubs-junit4.version>
@@ -289,24 +292,31 @@
         <taglibs-standard.version>1.2.5</taglibs-standard.version>
         <testcontainers.version>1.15.1</testcontainers.version>
         <txw2.version>2.4.0-b180830.0438</txw2.version>
+        <uuid.generator.version>5.2.0</uuid.generator.version>
         <velocity.version>2.4.1</velocity.version>
         <woodstox-core.version>6.4.0</woodstox-core.version>
         <xmlsec.version>4.0.4</xmlsec.version>
         <xmltool.version>3.3</xmltool.version>
-        <xml-jaxb.version>2.3.1</xml-jaxb.version>
+        <!-- Pinned to 3.0.2 (not 4.0.x): jakarta.xml.bind-api 4.0.x removed jaxb.properties
+             support from ContextFinder, so JAXBContext.newInstance(contextPath,...) picks the
+             glassfish RI via ServiceLoader instead of MOXy and rejects MOXy-only properties
+             (eclipselink.oxm.metadata-source, MEDIA_TYPE). 3.0.2 still honors the per-package
+             jaxb.properties selector, letting MOXy win. MOXy 4.0.9 runs fine against this API. -->
+        <xml-jaxb.version>3.0.2</xml-jaxb.version>
         <xml-matchers.version>0.10</xml-matchers.version>
         <zookeeper.version>3.8.6</zookeeper.version>
         <docker-maven-plugin.version>0.45.0</docker-maven-plugin.version>
         <docker.platforms>linux/amd64,linux/arm64</docker.platforms>
         <snakeyaml.version>2.4</snakeyaml.version>
         <xml-maven-plugin.version>1.1.0</xml-maven-plugin.version>
-        <jakarta.xml.bind.version>4.0.2</jakarta.xml.bind.version>
+        <jakarta.xml.bind.version>4.0.5</jakarta.xml.bind.version>
         <jakarta.xml.ws.version>4.0.2</jakarta.xml.ws.version>
         <jakarta.activation.version>2.0.1</jakarta.activation.version>
         <jakarta.json.version>2.1.3</jakarta.json.version>
+        <glassfish.jakarta.json.version>2.0.1</glassfish.jakarta.json.version>
         <eclipse.parsson.version>1.1.7</eclipse.parsson.version>
         <objenesis.version>3.3</objenesis.version>
-        <moxy.version>4.0.2</moxy.version>
+        <moxy.version>4.0.9</moxy.version>
         <maven.surefire.plugin.version>3.5.3</maven.surefire.plugin.version>
         <maven.failsafe.plugin.version>3.5.3</maven.failsafe.plugin.version>
     </properties>
@@ -415,7 +425,7 @@
                             <dependency>
                                 <groupId>org.apache.knox</groupId>
                                 <artifactId>build-tools</artifactId>
-                                <version>3.0.0-SNAPSHOT</version>
+                                <version>3.1.0-SNAPSHOT</version>
                             </dependency>
                         </dependencies>
                     </plugin>
@@ -608,7 +618,6 @@
                     </excludedGroups>
                     <systemPropertyVariables>
                         <project.version>${project.version}</project.version>
-                        <derby.stream.error.file>/dev/null</derby.stream.error.file>
                     </systemPropertyVariables>
                 </configuration>
             </plugin>
@@ -630,7 +639,6 @@
                                 <include>**/*.java</include>
                             </includes>
                             <systemPropertyVariables>
-                                <derby.stream.error.file>/dev/null</derby.stream.error.file>
                             </systemPropertyVariables>
                         </configuration>
                     </execution>
@@ -703,7 +711,7 @@
                     <dependency>
                         <groupId>org.apache.knox</groupId>
                         <artifactId>build-tools</artifactId>
-                        <version>3.0.0-SNAPSHOT</version>
+                        <version>3.1.0-SNAPSHOT</version>
                     </dependency>
                     <!-- overwrite dependency on spotbugs if you want to specify the version of spotbugs -->
                     <dependency>
@@ -739,7 +747,7 @@
                         <signaturesArtifact>
                             <groupId>org.apache.knox</groupId>
                             <artifactId>build-tools</artifactId>
-                            <version>3.0.0-SNAPSHOT</version>
+                            <version>3.1.0-SNAPSHOT</version>
                             <type>jar</type>
                             <path>build-tools/forbiddenapis/signatures.txt</path>
                         </signaturesArtifact>
@@ -778,7 +786,7 @@
                     <dependency>
                         <groupId>org.apache.knox</groupId>
                         <artifactId>build-tools</artifactId>
-                        <version>3.0.0-SNAPSHOT</version>
+                        <version>3.1.0-SNAPSHOT</version>
                     </dependency>
                     <dependency>
                         <groupId>com.puppycrawl.tools</groupId>
@@ -823,6 +831,7 @@
                                 <ignoredNonTestScopedDependency>org.apache.mina:mina-core</ignoredNonTestScopedDependency>
                             </ignoredNonTestScopedDependencies>
                             <ignoredUsedUndeclaredDependencies>
+                                <ignoredUsedUndeclaredDependency>org.eclipse.jetty.toolchain:jetty-servlet-api</ignoredUsedUndeclaredDependency>
                                 <ignoredUsedUndeclaredDependency>org.glassfish.hk2.external:jakarta.inject</ignoredUsedUndeclaredDependency>
                                 <ignoredUsedUndeclaredDependency>jakarta.ws.rs:jakarta.ws.rs-api</ignoredUsedUndeclaredDependency>
                                 <ignoredUsedUndeclaredDependency>jakarta.annotation:jakarta.annotation-api</ignoredUsedUndeclaredDependency>
@@ -908,7 +917,7 @@
                     <dependency>
                         <groupId>org.apache.knox</groupId>
                         <artifactId>build-tools</artifactId>
-                        <version>3.0.0-SNAPSHOT</version>
+                        <version>3.1.0-SNAPSHOT</version>
                     </dependency>
                 </dependencies>
             </plugin>
@@ -1429,6 +1438,11 @@
                 <version>${project.version}</version>
             </dependency>
             <dependency>
+                <groupId>org.apache.knox</groupId>
+                <artifactId>gateway-service-knoxidf</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
                 <groupId>org.glassfish.jersey.containers</groupId>
                 <artifactId>jersey-container-servlet-core</artifactId>
                 <version>${jersey.version}</version>
@@ -1441,6 +1455,11 @@
             <dependency>
                 <groupId>org.glassfish.jersey.core</groupId>
                 <artifactId>jersey-server</artifactId>
+                <version>${jersey.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.glassfish.jersey.core</groupId>
+                <artifactId>jersey-common</artifactId>
                 <version>${jersey.version}</version>
             </dependency>
 
@@ -1466,22 +1485,59 @@
                 <scope>import</scope>
             </dependency>
             <dependency>
-                <groupId>org.eclipse.jetty</groupId>
-                <artifactId>jetty-servlets</artifactId>
+                <groupId>org.eclipse.jetty.ee10</groupId>
+                <artifactId>jetty-ee10-servlet</artifactId>
                 <version>${jetty.version}</version>
             </dependency>
-            <!-- Need these additional due to classifier tests -->
             <dependency>
-                <groupId>org.eclipse.jetty</groupId>
-                <artifactId>jetty-servlet</artifactId>
+                <groupId>org.eclipse.jetty.ee10</groupId>
+                <artifactId>jetty-ee10-servlets</artifactId>
                 <version>${jetty.version}</version>
-                <classifier>tests</classifier>
             </dependency>
             <dependency>
-                <groupId>org.eclipse.jetty</groupId>
-                <artifactId>jetty-http</artifactId>
+                <groupId>org.eclipse.jetty.ee10</groupId>
+                <artifactId>jetty-ee10-webapp</artifactId>
                 <version>${jetty.version}</version>
-                <classifier>tests</classifier>
+            </dependency>
+            <dependency>
+                <groupId>org.eclipse.jetty.ee10</groupId>
+                <artifactId>jetty-ee10-annotations</artifactId>
+                <version>${jetty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.eclipse.jetty.ee10</groupId>
+                <artifactId>jetty-ee10-apache-jsp</artifactId>
+                <version>${jetty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.eclipse.jetty.ee10</groupId>
+                <artifactId>jetty-ee10-glassfish-jstl</artifactId>
+                <version>${jetty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.eclipse.jetty.websocket</groupId>
+                <artifactId>jetty-websocket-jetty-server</artifactId>
+                <version>${jetty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.eclipse.jetty.websocket</groupId>
+                <artifactId>jetty-websocket-jetty-api</artifactId>
+                <version>${jetty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.eclipse.jetty.ee10.websocket</groupId>
+                <artifactId>jetty-ee10-websocket-jakarta-server</artifactId>
+                <version>${jetty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.eclipse.jetty.ee10.websocket</groupId>
+                <artifactId>jetty-ee10-websocket-jakarta-client</artifactId>
+                <version>${jetty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.eclipse.jetty.ee10.websocket</groupId>
+                <artifactId>jetty-ee10-websocket-servlet</artifactId>
+                <version>${jetty.version}</version>
             </dependency>
 
             <dependency>
@@ -1505,6 +1561,11 @@
                 <artifactId>nimbus-jose-jwt</artifactId>
                 <version>${nimbus-jose-jwt.version}</version>
             </dependency>
+            <dependency>
+                <groupId>com.nimbusds</groupId>
+                <artifactId>oauth2-oidc-sdk</artifactId>
+                <version>${oauth2-oidc-sdk.version}</version>
+            </dependency>
 
             <dependency>
                 <groupId>net.minidev</groupId>
@@ -1513,24 +1574,31 @@
             </dependency>
 
             <dependency>
-                <groupId>javax.annotation</groupId>
-                <artifactId>javax.annotation-api</artifactId>
-                <version>${javax.annotation-api.version}</version>
-            </dependency>
-            <dependency>
                 <groupId>org.glassfish.hk2.external</groupId>
                 <artifactId>javax.inject</artifactId>
                 <version>${javax.inject.version}</version>
             </dependency>
             <dependency>
-                <groupId>javax.servlet</groupId>
-                <artifactId>javax.servlet-api</artifactId>
-                <version>${javax.servlet-api.version}</version>
+                <groupId>jakarta.inject</groupId>
+                <artifactId>jakarta.inject-api</artifactId>
+                <version>${jakarta.inject-api.version}</version>
             </dependency>
             <dependency>
-                <groupId>javax.ws.rs</groupId>
-                <artifactId>javax.ws.rs-api</artifactId>
-                <version>${javax.ws.rs-api.version}</version>
+                <groupId>jakarta.servlet</groupId>
+                <artifactId>jakarta.servlet-api</artifactId>
+                <version>${jakarta.servlet-api.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>jakarta.ws.rs</groupId>
+                <artifactId>jakarta.ws.rs-api</artifactId>
+                <version>${jakarta.ws.rs-api.version}</version>
+            </dependency>
+            <!-- Converge jakarta.el-api: Jetty EE10 apache-jsp (mortbay-apache-el)
+                 pulls 5.0.1 while jetty-ee10-plus/cdi-api pulls 5.0.0. -->
+            <dependency>
+                <groupId>jakarta.el</groupId>
+                <artifactId>jakarta.el-api</artifactId>
+                <version>${jakarta.el-api.version}</version>
             </dependency>
 
             <dependency>
@@ -1563,16 +1631,12 @@
                 <artifactId>jaxb-runtime</artifactId>
                 <version>${xml-jaxb.version}</version>
             </dependency>
+            <!-- Pin angus-activation to the version MOXy 4.0.9 expects (2.0.3) so it converges
+                 against the activation impl pulled elsewhere in the reactor. -->
             <dependency>
-                <groupId>com.sun.xml.bind</groupId>
-                <artifactId>jaxb-impl</artifactId>
-                <version>${xml-jaxb.version}</version>
-                <exclusions>
-                    <exclusion>
-                        <groupId>org.eclipse.angus</groupId>
-                        <artifactId>angus-activation</artifactId>
-                    </exclusion>
-                </exclusions>
+                <groupId>org.eclipse.angus</groupId>
+                <artifactId>angus-activation</artifactId>
+                <version>2.0.3</version>
             </dependency>
 
             <dependency>
@@ -1617,19 +1681,14 @@
             </dependency>
             -->
             <dependency>
-                <groupId>javax.json</groupId>
-                <artifactId>javax.json-api</artifactId>
-                <version>${javax.json.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.glassfish</groupId>
-                <artifactId>javax.json</artifactId>
-                <version>${javax.json.version}</version>
-            </dependency>
-            <dependency>
                 <groupId>jakarta.json</groupId>
                 <artifactId>jakarta.json-api</artifactId>
                 <version>${jakarta.json.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.glassfish</groupId>
+                <artifactId>jakarta.json</artifactId>
+                <version>${glassfish.jakarta.json.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.eclipse.parsson</groupId>
@@ -1676,14 +1735,53 @@
             </dependency>
 
             <dependency>
-                <groupId>org.fusesource.jansi</groupId>
+                <groupId>org.jline</groupId>
                 <artifactId>jansi</artifactId>
-                <version>${jansi.version}</version>
+                <version>${jline.version}</version>
             </dependency>
-
             <dependency>
                 <groupId>org.jline</groupId>
-                <artifactId>jline</artifactId>
+                <artifactId>jline-builtins</artifactId>
+                <version>${jline.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.jline</groupId>
+                <artifactId>jline-console</artifactId>
+                <version>${jline.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.jline</groupId>
+                <artifactId>jline-reader</artifactId>
+                <version>${jline.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.jline</groupId>
+                <artifactId>jline-terminal</artifactId>
+                <version>${jline.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.jline</groupId>
+                <artifactId>jline-terminal-jni</artifactId>
+                <version>${jline.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.jline</groupId>
+                <artifactId>jline-terminal-jansi</artifactId>
+                <version>${jline.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.jline</groupId>
+                <artifactId>jline-terminal-jna</artifactId>
+                <version>${jline.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.jline</groupId>
+                <artifactId>jline-native</artifactId>
+                <version>${jline.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.jline</groupId>
+                <artifactId>jline-style</artifactId>
                 <version>${jline.version}</version>
             </dependency>
 
@@ -2024,6 +2122,10 @@
                         <groupId>io.netty</groupId>
                         <artifactId>*</artifactId>
                     </exclusion>
+                    <exclusion>
+                        <groupId>javax.servlet</groupId>
+                        <artifactId>javax.servlet-api</artifactId>
+                    </exclusion>
                 </exclusions>
             </dependency>
 
@@ -2042,6 +2144,11 @@
                 <groupId>com.fasterxml.woodstox</groupId>
                 <artifactId>woodstox-core</artifactId>
                 <version>${woodstox-core.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fasterxml.uuid</groupId>
+                <artifactId>java-uuid-generator</artifactId>
+                <version>${uuid.generator.version}</version>
             </dependency>
 
             <dependency>
@@ -2235,6 +2342,11 @@
                 <artifactId>apacheds-jdbm-partition</artifactId>
                 <version>${apacheds.directory.server.version}</version>
             </dependency>
+            <dependency>
+                <groupId>org.apache.directory.server</groupId>
+                <artifactId>apacheds-interceptors-authn</artifactId>
+                <version>${apacheds.directory.server.version}</version>
+            </dependency>
 
             <dependency>
                 <groupId>org.apache.directory.api</groupId>
@@ -2354,22 +2466,43 @@
                 <groupId>com.google.guava</groupId>
                 <artifactId>guava</artifactId>
                 <version>${guava.version}</version>
-                <exclusions>
-                    <exclusion>
-                        <groupId>com.google.code.findbugs</groupId>
-                        <artifactId>jsr305</artifactId>
-                    </exclusion>
-                </exclusions>
             </dependency>
 
             <dependency>
                 <groupId>org.apache.shiro</groupId>
                 <artifactId>shiro-core</artifactId>
                 <version>${shiro.version}</version>
+                <classifier>jakarta</classifier>
             </dependency>
             <dependency>
                 <groupId>org.apache.shiro</groupId>
                 <artifactId>shiro-web</artifactId>
+                <version>${shiro.version}</version>
+                <classifier>jakarta</classifier>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.shiro</groupId>
+                <artifactId>shiro-config-core</artifactId>
+                <version>${shiro.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.shiro</groupId>
+                <artifactId>shiro-cache</artifactId>
+                <version>${shiro.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.shiro</groupId>
+                <artifactId>shiro-crypto-core</artifactId>
+                <version>${shiro.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.shiro</groupId>
+                <artifactId>shiro-crypto-hash</artifactId>
+                <version>${shiro.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.shiro</groupId>
+                <artifactId>shiro-lang</artifactId>
                 <version>${shiro.version}</version>
             </dependency>
 
@@ -2377,6 +2510,7 @@
                 <groupId>org.ehcache</groupId>
                 <artifactId>ehcache</artifactId>
                 <version>${ehcache.version}</version>
+                <classifier>jakarta</classifier>
             </dependency>
 
             <dependency>
@@ -2477,6 +2611,11 @@
                 <version>${bcpkix-jdk18on.version}</version>
             </dependency>
             <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcutil-jdk18on</artifactId>
+                <version>${bcutil-jdk18on.version}</version>
+            </dependency>
+            <dependency>
                 <groupId>org.ow2.asm</groupId>
                 <artifactId>asm</artifactId>
                 <version>${asm.version}</version>
@@ -2500,14 +2639,14 @@
 
             <!-- Websocket support -->
             <dependency>
-                <groupId>javax.websocket</groupId>
-                <artifactId>javax.websocket-api</artifactId>
-                <version>${javax.websocket-api.version}</version>
+                <groupId>jakarta.websocket</groupId>
+                <artifactId>jakarta.websocket-api</artifactId>
+                <version>${jakarta.websocket-api.version}</version>
             </dependency>
             <dependency>
-                <groupId>javax.websocket</groupId>
-                <artifactId>javax.websocket-client-api</artifactId>
-                <version>${javax.websocket-api.version}</version>
+                <groupId>jakarta.websocket</groupId>
+                <artifactId>jakarta.websocket-client-api</artifactId>
+                <version>${jakarta.websocket-api.version}</version>
             </dependency>
 
             <dependency>
@@ -2522,7 +2661,7 @@
             </dependency>
             <dependency>
                 <groupId>io.dropwizard.metrics</groupId>
-                <artifactId>metrics-servlets</artifactId>
+                <artifactId>metrics-jakarta-servlets</artifactId>
                 <version>${metrics.version}</version>
             </dependency>
             <dependency>
@@ -2537,7 +2676,7 @@
             </dependency>
             <dependency>
                 <groupId>io.dropwizard.metrics</groupId>
-                <artifactId>metrics-jetty9</artifactId>
+                <artifactId>metrics-jetty12</artifactId>
                 <version>${metrics.version}</version>
             </dependency>
             <dependency>
@@ -2586,7 +2725,7 @@
             <dependency>
                 <groupId>org.mariadb.jdbc</groupId>
                 <artifactId>mariadb-java-client</artifactId>
-                <version>3.3.0</version>
+                <version>${mariadb.connector.version}</version>
                 <exclusions>
                     <exclusion>
                        <groupId>com.github.waffle</groupId>
@@ -2642,7 +2781,12 @@
             </dependency>
             <dependency>
                 <groupId>org.pac4j</groupId>
-                <artifactId>pac4j-javaee</artifactId>
+                <artifactId>jakartaee-pac4j</artifactId>
+                <version>${jee-pac4j.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.pac4j</groupId>
+                <artifactId>pac4j-jakartaee</artifactId>
                 <version>${pac4j.version}</version>
             </dependency>
             <dependency>
@@ -2692,12 +2836,6 @@
                 <groupId>org.dom4j</groupId>
                 <artifactId>dom4j</artifactId>
                 <version>${dom4j.version}</version>
-            </dependency>
-
-            <dependency>
-                <groupId>org.pac4j</groupId>
-                <artifactId>javaee-pac4j</artifactId>
-                <version>${jee-pac4j.version}</version>
             </dependency>
 
             <!-- harmonize pac4j-saml dependencies -->
@@ -2980,24 +3118,6 @@
             </dependency>
 
             <dependency>
-                <groupId>org.apache.derby</groupId>
-                <artifactId>derby</artifactId>
-                <version>${derby.db.version}</version>
-            </dependency>
-
-            <dependency>
-                <groupId>org.apache.derby</groupId>
-                <artifactId>derbyclient</artifactId>
-                <version>${derby.db.version}</version>
-            </dependency>
-
-            <dependency>
-                <groupId>org.apache.derby</groupId>
-                <artifactId>derbynet</artifactId>
-                <version>${derby.db.version}</version>
-            </dependency>
-
-            <dependency>
                 <groupId>org.apache.velocity</groupId>
                 <artifactId>velocity-engine-core</artifactId>
                 <version>${velocity.version}</version>
@@ -3059,10 +3179,9 @@
                 <scope>test</scope>
             </dependency>
             <dependency>
-                <groupId>org.hsqldb</groupId>
-                <artifactId>hsqldb</artifactId>
-                <version>${hsql.db.version}</version>
-                <classifier>jdk8</classifier>
+                <groupId>com.h2database</groupId>
+                <artifactId>h2</artifactId>
+                <version>${h2.db.version}</version>
             </dependency>
             <dependency>
                 <groupId>uk.org.webcompere</groupId>

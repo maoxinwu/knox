@@ -22,7 +22,13 @@ import org.apache.directory.api.ldap.model.cursor.EntryCursor;
 import org.apache.directory.api.ldap.model.exception.LdapAuthenticationException;
 import org.apache.directory.api.ldap.model.exception.LdapException;
 import org.apache.directory.api.ldap.model.exception.LdapProtocolErrorException;
+import org.apache.directory.api.ldap.model.cursor.SearchCursor;
 import org.apache.directory.api.ldap.model.message.Control;
+import org.apache.directory.api.ldap.model.message.Response;
+import org.apache.directory.api.ldap.model.message.ResultCodeEnum;
+import org.apache.directory.api.ldap.model.message.SearchRequest;
+import org.apache.directory.api.ldap.model.message.SearchRequestImpl;
+import org.apache.directory.api.ldap.model.message.SearchResultEntry;
 import org.apache.directory.api.ldap.model.message.SearchScope;
 import org.apache.directory.ldap.client.api.LdapConnection;
 import org.apache.directory.ldap.client.api.LdapNetworkConnection;
@@ -63,12 +69,14 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import static org.easymock.EasyMock.expect;
 import static org.easymock.EasyMock.replay;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.fail;
@@ -82,6 +90,8 @@ public class KnoxLDAPServerManagerTest {
     private static final String BIND_PASSWORD = "knox-password";
     private static final String KEYSTORE_PASSWORD = "keystore-password";
     private static final String SSL_KEYSTORE_ALIAS = "gateway_ldap_ssl_keystore_password";
+    public static final String BASE_DN = "dc=test,dc=com";
+    private static final String ALICE_DN = "uid=alice,ou=people," + BASE_DN;
 
     private KnoxLDAPServerManager serverManager;
     private File tempWorkDir;
@@ -133,7 +143,7 @@ public class KnoxLDAPServerManagerTest {
         GatewayConfig mockConfig = EasyMock.createNiceMock(GatewayConfig.class);
         expect(mockConfig.getGatewayDataDir()).andReturn(tempWorkDir.getParent()).anyTimes();
         expect(mockConfig.getLDAPPort()).andReturn(port).anyTimes();
-        expect(mockConfig.getLDAPBaseDN()).andReturn("dc=test,dc=com").anyTimes();
+        expect(mockConfig.getLDAPBaseDN()).andReturn(BASE_DN).anyTimes();
         expect(mockConfig.getLDAPInterceptorNames()).andReturn(List.of("filebackend")).anyTimes();
         expect(mockConfig.getLDAPBackendDataFile()).andReturn(tempLdapFile.getAbsolutePath()).anyTimes();
         Map<String, String> backendConfig = createFileBackendInterceptorConfig();
@@ -143,7 +153,7 @@ public class KnoxLDAPServerManagerTest {
         serverManager.initialize(mockConfig);
 
         assertEquals("Port should be set correctly", port, serverManager.getPort());
-        assertEquals("Base DN should be set correctly", "dc=test,dc=com", serverManager.getBaseDn());
+        assertEquals("Base DN should be set correctly", BASE_DN, serverManager.getBaseDn());
         assertFalse("Should not be running after initialize", serverManager.isRunning());
     }
 
@@ -152,7 +162,7 @@ public class KnoxLDAPServerManagerTest {
         GatewayConfig mockConfig = EasyMock.createNiceMock(GatewayConfig.class);
         expect(mockConfig.getGatewayDataDir()).andReturn(tempWorkDir.getParent()).anyTimes();
         expect(mockConfig.getLDAPPort()).andReturn(port).anyTimes();
-        expect(mockConfig.getLDAPBaseDN()).andReturn("dc=test,dc=com").anyTimes();
+        expect(mockConfig.getLDAPBaseDN()).andReturn(BASE_DN).anyTimes();
         expect(mockConfig.getLDAPInterceptorNames()).andReturn(List.of("ldapbackend")).anyTimes();
         Map<String, String> backendConfig = createLdapBackendInterceptorConfig();
         expect(mockConfig.getLDAPInterceptorConfig("ldapbackend")).andReturn(backendConfig).anyTimes();
@@ -161,7 +171,7 @@ public class KnoxLDAPServerManagerTest {
         serverManager.initialize(mockConfig);
 
         assertEquals("Port should be set correctly", port, serverManager.getPort());
-        assertEquals("Base DN should be set correctly", "dc=test,dc=com", serverManager.getBaseDn());
+        assertEquals("Base DN should be set correctly", BASE_DN, serverManager.getBaseDn());
         assertFalse("Should not be running after initialize", serverManager.isRunning());
     }
 
@@ -183,7 +193,7 @@ public class KnoxLDAPServerManagerTest {
         GatewayConfig mockConfig = EasyMock.createNiceMock(GatewayConfig.class);
         expect(mockConfig.getGatewayDataDir()).andReturn(tempWorkDir.getParent()).anyTimes();
         expect(mockConfig.getLDAPPort()).andReturn(port).anyTimes();
-        expect(mockConfig.getLDAPBaseDN()).andReturn("dc=test,dc=com").anyTimes();
+        expect(mockConfig.getLDAPBaseDN()).andReturn(BASE_DN).anyTimes();
         expect(mockConfig.getLDAPInterceptorNames()).andReturn(List.of("filebackend", "ldapbackend")).anyTimes();
         expect(mockConfig.getLDAPBackendDataFile()).andReturn(tempLdapFile.getAbsolutePath()).anyTimes();
         Map<String, String> fileBackendConfig = createFileBackendInterceptorConfig();
@@ -195,8 +205,40 @@ public class KnoxLDAPServerManagerTest {
         serverManager.initialize(mockConfig);
 
         assertEquals("Port should be set correctly", port, serverManager.getPort());
-        assertEquals("Base DN should be set correctly", "dc=test,dc=com", serverManager.getBaseDn());
+        assertEquals("Base DN should be set correctly", BASE_DN, serverManager.getBaseDn());
         assertFalse("Should not be running after initialize", serverManager.isRunning());
+    }
+
+    @Test
+    public void testInitializeWithBindConfig() throws Exception {
+        useBindPassword(BIND_PASSWORD);
+        GatewayConfig mockConfig = EasyMock.createNiceMock(GatewayConfig.class);
+        expect(mockConfig.getGatewayDataDir()).andReturn(tempWorkDir.getParent()).anyTimes();
+        expect(mockConfig.getLDAPPort()).andReturn(port).anyTimes();
+        expect(mockConfig.getLDAPBaseDN()).andReturn(BASE_DN).anyTimes();
+        expect(mockConfig.getLDAPBindUser()).andReturn(BIND_DN).anyTimes();
+        expect(mockConfig.getLDAPInterceptorNames()).andReturn(List.of("filebackend")).anyTimes();
+        expect(mockConfig.getLDAPBackendDataFile()).andReturn(tempLdapFile.getAbsolutePath()).anyTimes();
+        expect(mockConfig.getLDAPInterceptorConfig("filebackend")).andReturn(createFileBackendInterceptorConfig()).anyTimes();
+        replay(mockConfig);
+
+        serverManager.initialize(mockConfig);
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void testInitializeWithBadBindDn() throws Exception {
+        useBindPassword(BIND_PASSWORD);
+        GatewayConfig mockConfig = EasyMock.createNiceMock(GatewayConfig.class);
+        expect(mockConfig.getGatewayDataDir()).andReturn(tempWorkDir.getParent()).anyTimes();
+        expect(mockConfig.getLDAPPort()).andReturn(port).anyTimes();
+        expect(mockConfig.getLDAPBaseDN()).andReturn(BASE_DN).anyTimes();
+        expect(mockConfig.getLDAPBindUser()).andReturn("uid=bad,dc=unknown,dc=com").anyTimes();
+        expect(mockConfig.getLDAPInterceptorNames()).andReturn(List.of("filebackend")).anyTimes();
+        expect(mockConfig.getLDAPBackendDataFile()).andReturn(tempLdapFile.getAbsolutePath()).anyTimes();
+        expect(mockConfig.getLDAPInterceptorConfig("filebackend")).andReturn(createFileBackendInterceptorConfig()).anyTimes();
+        replay(mockConfig);
+
+        serverManager.initialize(mockConfig);
     }
 
     @Test
@@ -278,7 +320,7 @@ public class KnoxLDAPServerManagerTest {
         GatewayConfig mockConfig = EasyMock.createNiceMock(GatewayConfig.class);
         expect(mockConfig.getGatewayDataDir()).andReturn(tempWorkDir.getParent()).anyTimes();
         expect(mockConfig.getLDAPPort()).andReturn(port).anyTimes();
-        expect(mockConfig.getLDAPBaseDN()).andReturn("dc=test,dc=com").anyTimes();
+        expect(mockConfig.getLDAPBaseDN()).andReturn(BASE_DN).anyTimes();
         expect(mockConfig.getLDAPInterceptorNames()).andReturn(List.of("filebackend")).anyTimes();
         expect(mockConfig.getLDAPBackendDataFile()).andReturn(tempLdapFile.getAbsolutePath()).anyTimes();
         Map<String, String> backendConfig = createFileBackendInterceptorConfig();
@@ -324,11 +366,142 @@ public class KnoxLDAPServerManagerTest {
     }
 
     @Test
+    public void testLdapBackendPasswordAliasIsResolved() throws Exception {
+        final String alias = "my-ad-password";
+        final String secret = "s3cr3t-ad-pass";
+        final String aliasRef = AliasService.ALIAS_PREFIX + alias + "}";
+
+        AliasService aliasService = EasyMock.createNiceMock(AliasService.class);
+        expect(aliasService.isAlias(aliasRef)).andReturn(true).anyTimes();
+        expect(aliasService.extractAlias(aliasRef)).andReturn(alias).anyTimes();
+        expect(aliasService.getPasswordFromAliasForGateway(alias)).andReturn(secret.toCharArray()).anyTimes();
+        replay(aliasService);
+        serverManager = new KnoxLDAPServerManager(aliasService);
+
+        Map<String, String> backendConfig = createLdapBackendInterceptorConfig();
+        backendConfig.put("systemPassword", aliasRef);
+
+        initializeWithLdapBackendConfig(backendConfig);
+
+        // createInterceptors mutates the interceptor config map in place before it reaches the backend.
+        assertEquals("Alias reference should be resolved to the credential-store secret",
+                secret, backendConfig.get("systemPassword"));
+    }
+
+    @Test
+    public void testLdapBackendLiteralPasswordIsUnchanged() throws Exception {
+        // Default alias service (setUp) resolves nothing; a literal password is not an alias.
+        Map<String, String> backendConfig = createLdapBackendInterceptorConfig();
+        assertEquals("admin-password", backendConfig.get("systemPassword"));
+
+        initializeWithLdapBackendConfig(backendConfig);
+
+        assertEquals("A literal password must be passed through untouched",
+                "admin-password", backendConfig.get("systemPassword"));
+    }
+
+    @Test
+    public void testLdapBackendUnresolvablePasswordAliasIsLeftUnchanged() throws Exception {
+        final String aliasRef = AliasService.ALIAS_PREFIX + "missing}";
+
+        AliasService aliasService = EasyMock.createNiceMock(AliasService.class);
+        expect(aliasService.isAlias(aliasRef)).andReturn(true).anyTimes();
+        expect(aliasService.extractAlias(aliasRef)).andReturn("missing").anyTimes();
+        expect(aliasService.getPasswordFromAliasForGateway("missing")).andReturn(null).anyTimes();
+        replay(aliasService);
+        serverManager = new KnoxLDAPServerManager(aliasService);
+
+        Map<String, String> backendConfig = createLdapBackendInterceptorConfig();
+        backendConfig.put("systemPassword", aliasRef);
+
+        initializeWithLdapBackendConfig(backendConfig);
+
+        // An unresolvable alias is left untouched (and logged at ERROR); the backend bind then fails
+        // naturally rather than the alias silently resolving to a different credential.
+        assertEquals("An unresolvable alias should be left as-is",
+                aliasRef, backendConfig.get("systemPassword"));
+    }
+
+    @Test
+    public void testLdapBackendPasswordAliasIsNotRetriedByDefault() throws Exception {
+        final String aliasRef = AliasService.ALIAS_PREFIX + "missing}";
+
+        AliasService aliasService = EasyMock.createNiceMock(AliasService.class);
+        expect(aliasService.isAlias(aliasRef)).andReturn(true).anyTimes();
+        expect(aliasService.extractAlias(aliasRef)).andReturn("missing").anyTimes();
+        final AtomicInteger lookups = countNullLookups(aliasService, "missing");
+        replay(aliasService);
+        serverManager = new KnoxLDAPServerManager(aliasService);
+
+        Map<String, String> backendConfig = createLdapBackendInterceptorConfig();
+        backendConfig.put("systemPassword", aliasRef);
+
+        initializeWithLdapBackendConfig(backendConfig);
+
+        assertEquals(aliasRef, backendConfig.get("systemPassword"));
+        assertEquals("With retries disabled (the default) the alias should be looked up exactly once", 1, lookups.get());
+    }
+
+    @Test
+    public void testLdapBackendPasswordAliasIsResolvedOnRetry() throws Exception {
+        final String alias = "my-ad-password";
+        final String secret = "s3cr3t-ad-pass";
+        final String aliasRef = AliasService.ALIAS_PREFIX + alias + "}";
+
+        AliasService aliasService = EasyMock.createNiceMock(AliasService.class);
+        expect(aliasService.isAlias(aliasRef)).andReturn(true).anyTimes();
+        expect(aliasService.extractAlias(aliasRef)).andReturn(alias).anyTimes();
+        // Not persisted yet on the first two lookups, then available
+        final AtomicInteger lookups = new AtomicInteger();
+        expect(aliasService.getPasswordFromAliasForGateway(alias)).andAnswer(() ->
+                lookups.incrementAndGet() > 2 ? secret.toCharArray() : null).anyTimes();
+        replay(aliasService);
+        serverManager = new KnoxLDAPServerManager(aliasService);
+
+        Map<String, String> backendConfig = createLdapBackendInterceptorConfig();
+        backendConfig.put("systemPassword", aliasRef);
+
+        initializeWithLdapBackendConfig(backendConfig, 5, 1);
+
+        assertEquals("Alias reference should be resolved once it appears in the credential store",
+                secret, backendConfig.get("systemPassword"));
+        assertEquals("Retries should stop as soon as the alias resolves", 3, lookups.get());
+    }
+
+    @Test
+    public void testLdapBackendPasswordAliasIsLeftUnchangedAfterRetriesAreExhausted() throws Exception {
+        final String aliasRef = AliasService.ALIAS_PREFIX + "missing}";
+        final String trustStoreAliasRef = AliasService.ALIAS_PREFIX + "missing-truststore}";
+
+        AliasService aliasService = EasyMock.createNiceMock(AliasService.class);
+        expect(aliasService.isAlias(aliasRef)).andReturn(true).anyTimes();
+        expect(aliasService.extractAlias(aliasRef)).andReturn("missing").anyTimes();
+        expect(aliasService.isAlias(trustStoreAliasRef)).andReturn(true).anyTimes();
+        expect(aliasService.extractAlias(trustStoreAliasRef)).andReturn("missing-truststore").anyTimes();
+        final AtomicInteger lookups = countNullLookups(aliasService, "missing");
+        final AtomicInteger trustStoreLookups = countNullLookups(aliasService, "missing-truststore");
+        replay(aliasService);
+        serverManager = new KnoxLDAPServerManager(aliasService);
+
+        Map<String, String> backendConfig = createLdapBackendInterceptorConfig();
+        backendConfig.put("systemPassword", aliasRef);
+        backendConfig.put("trustStorePassword", trustStoreAliasRef);
+
+        initializeWithLdapBackendConfig(backendConfig, 2, 1);
+
+        assertEquals(aliasRef, backendConfig.get("systemPassword"));
+        assertEquals(trustStoreAliasRef, backendConfig.get("trustStorePassword"));
+        // One initial lookup plus two retries, for each pending alias
+        assertEquals(3, lookups.get());
+        assertEquals(3, trustStoreLookups.get());
+    }
+
+    @Test
     public void testStartWithMultipleBackends() throws Exception {
         GatewayConfig mockConfig = EasyMock.createNiceMock(GatewayConfig.class);
         expect(mockConfig.getGatewayDataDir()).andReturn(tempWorkDir.getParent()).anyTimes();
         expect(mockConfig.getLDAPPort()).andReturn(port).anyTimes();
-        expect(mockConfig.getLDAPBaseDN()).andReturn("dc=test,dc=com").anyTimes();
+        expect(mockConfig.getLDAPBaseDN()).andReturn(BASE_DN).anyTimes();
         expect(mockConfig.getLDAPInterceptorNames()).andReturn(List.of("filebackend", "ldapbackend")).anyTimes();
         expect(mockConfig.getLDAPBackendDataFile()).andReturn(tempLdapFile.getAbsolutePath()).anyTimes();
         Map<String, String> fileBackendConfig = createFileBackendInterceptorConfig();
@@ -380,7 +553,7 @@ public class KnoxLDAPServerManagerTest {
         GatewayConfig mockConfig = EasyMock.createNiceMock(GatewayConfig.class);
         expect(mockConfig.getGatewayDataDir()).andReturn(tempWorkDir.getParent()).anyTimes();
         expect(mockConfig.getLDAPPort()).andReturn(port).anyTimes();
-        expect(mockConfig.getLDAPBaseDN()).andReturn("dc=test,dc=com").anyTimes();
+        expect(mockConfig.getLDAPBaseDN()).andReturn(BASE_DN).anyTimes();
         expect(mockConfig.getLDAPInterceptorNames()).andReturn(List.of("ldapbackend", "ldap backend")).anyTimes();
         expect(mockConfig.getLDAPBackendDataFile()).andReturn(tempLdapFile.getAbsolutePath()).anyTimes();
         Map<String, String> ldapBackendConfig = createLdapBackendInterceptorConfig();
@@ -418,7 +591,7 @@ public class KnoxLDAPServerManagerTest {
         GatewayConfig mockConfig = EasyMock.createNiceMock(GatewayConfig.class);
         expect(mockConfig.getGatewayDataDir()).andReturn(tempWorkDir.getParent()).anyTimes();
         expect(mockConfig.getLDAPPort()).andReturn(port).anyTimes();
-        expect(mockConfig.getLDAPBaseDN()).andReturn("dc=test,dc=com").anyTimes();
+        expect(mockConfig.getLDAPBaseDN()).andReturn(BASE_DN).anyTimes();
         expect(mockConfig.getLDAPInterceptorNames()).andReturn(List.of()).anyTimes();
         replay(mockConfig);
 
@@ -466,6 +639,49 @@ public class KnoxLDAPServerManagerTest {
     }
 
     @Test
+    public void testLookupUserGroupsRolesLookupNotAppliedWhenUserNotFound() throws Exception {
+        serverManager.initialize(createNoInterceptorConfig());
+        serverManager.start();
+
+        // The roles lookup interceptor looks up roles per returned user entry: with no entry, no lookup
+        // happened even though the interceptor is configured.
+        setRolesLookupInterceptorFlag(true);
+
+        UserGroupsLookupResult result = serverManager.lookupUserGroups("not-in-ldap");
+
+        assertTrue(result.groups().isEmpty());
+        assertFalse("Roles lookup must not be reported as applied for a user not found", result.rolesLookupApplied());
+    }
+
+    @Test
+    public void testLookupUserGroupsRolesLookupAppliedWhenUserFound() throws Exception {
+        serverManager.initialize(createNoInterceptorConfig());
+        serverManager.start();
+
+        addUserWithMemberOf("sam", "cn=platform:admin-sam");
+        setRolesLookupInterceptorFlag(true);
+
+        UserGroupsLookupResult result = serverManager.lookupUserGroups("sam");
+
+        assertEquals(List.of("platform:admin-sam"), result.groups());
+        assertTrue(result.rolesLookupApplied());
+    }
+
+    @Test
+    public void testLookupUserGroupsRolesLookupNotAppliedWithoutInterceptor() throws Exception {
+        serverManager.initialize(createNoInterceptorConfig());
+        serverManager.start();
+
+        addUserWithMemberOf("sam", "cn=analysts,ou=groups,dc=test,dc=com");
+        setRolesLookupInterceptorFlag(false);
+
+        UserGroupsLookupResult result = serverManager.lookupUserGroups("sam");
+
+        assertEquals(List.of("analysts"), result.groups());
+        assertFalse(result.rolesLookupApplied());
+    }
+
+    @Test
     public void testStartSetsMaxSizeAndTime() throws Exception {
         final int expectedMaxSize = 3158;
         final int expectedMaxTime = 245000;
@@ -473,7 +689,7 @@ public class KnoxLDAPServerManagerTest {
         GatewayConfig mockConfig = EasyMock.createNiceMock(GatewayConfig.class);
         expect(mockConfig.getGatewayDataDir()).andReturn(tempWorkDir.getParent()).anyTimes();
         expect(mockConfig.getLDAPPort()).andReturn(port).anyTimes();
-        expect(mockConfig.getLDAPBaseDN()).andReturn("dc=test,dc=com").anyTimes();
+        expect(mockConfig.getLDAPBaseDN()).andReturn(BASE_DN).anyTimes();
         expect(mockConfig.getLDAPInterceptorNames()).andReturn(List.of()).anyTimes();
         expect(mockConfig.getLDAPMaxSizeLimit()).andReturn(expectedMaxSize).anyTimes();
         expect(mockConfig.getLDAPMaxTimeLimit()).andReturn(expectedMaxTime).anyTimes();
@@ -508,7 +724,7 @@ public class KnoxLDAPServerManagerTest {
             connection.bind(BIND_DN, BIND_PASSWORD);
             assertTrue("Connection should be authenticated", connection.isAuthenticated());
             // An authenticated client should be able to search.
-            try (EntryCursor cursor = connection.search("dc=test,dc=com", "(objectClass=*)", SearchScope.SUBTREE)) {
+            try (EntryCursor cursor = connection.search(BASE_DN, "(objectClass=*)", SearchScope.SUBTREE)) {
                 assertTrue("Authenticated search should return at least one entry", cursor.next());
             }
         }
@@ -526,11 +742,143 @@ public class KnoxLDAPServerManagerTest {
     }
 
     @Test
+    public void testBindUserIsAuthenticatedLocallyByBackendInterceptors() throws Exception {
+        final String bindDn = "uid=proxy-user,ou=people," + BASE_DN;
+        useBindPassword(BIND_PASSWORD);
+        serverManager.initialize(createBindEnabledConfig(bindDn));
+        serverManager.start();
+
+        UserSearchInterceptor interceptor = (UserSearchInterceptor) serverManager.directoryService.getInterceptor("filebackend");
+        assertEquals(new Dn(serverManager.directoryService.getSchemaManager(), bindDn), interceptor.getLocalBindDn());
+        try (LdapConnection connection = new LdapNetworkConnection("localhost", port)) {
+            connection.bind(bindDn, BIND_PASSWORD);
+            assertTrue("Connection should be authenticated", connection.isAuthenticated());
+        }
+    }
+
+    @Test
+    public void testNoLocalBindUserWhenUnconfigured() throws Exception {
+        serverManager.initialize(createBindEnabledConfig());
+        serverManager.start();
+
+        UserSearchInterceptor interceptor = (UserSearchInterceptor) serverManager.directoryService.getInterceptor("filebackend");
+        assertNull(interceptor.getLocalBindDn());
+    }
+
+    @Test
+    public void testBaseObjectSearchOnBackendUserIsAnsweredByBackend() throws Exception {
+        startWithBackendUsers();
+
+        // The user only exists in the backend, so the local partition has no entry for the search base.
+        try (LdapConnection connection = new LdapNetworkConnection("localhost", port)) {
+            connection.bind();
+            try (EntryCursor cursor = connection.search(ALICE_DN, "(uid=alice)", SearchScope.OBJECT)) {
+                assertTrue("Base-object search should return the backend user", cursor.next());
+                assertEquals("Alice", cursor.get().get("cn").getString());
+                assertFalse("Base-object search should return a single entry", cursor.next());
+            }
+        }
+    }
+
+    @Test
+    public void testBaseObjectSearchOnBackendUserMatchesAnyEntryFilter() throws Exception {
+        startWithBackendUsers();
+
+        try (LdapConnection connection = new LdapNetworkConnection("localhost", port)) {
+            connection.bind();
+            // The usual "read this entry" request, and filters that are not on the user id
+            for (String filter : List.of("(objectClass=*)", "(objectClass=inetOrgPerson)", "(&(objectClass=person)(cn=Al*))")) {
+                List<Entry> entries = new ArrayList<>();
+                assertEquals(filter, ResultCodeEnum.SUCCESS, search(connection, ALICE_DN, filter, SearchScope.OBJECT, entries));
+                assertEquals(filter, List.of(ALICE_DN), dns(entries));
+                assertEquals(filter, "Alice", entries.get(0).get("cn").getString());
+            }
+        }
+    }
+
+    @Test
+    public void testSearchOnBackendUserOnlyMatchesThatUser() throws Exception {
+        startWithBackendUsers();
+
+        try (LdapConnection connection = new LdapNetworkConnection("localhost", port)) {
+            connection.bind();
+            // bob exists in the backend but is not alice's entry nor below it
+            for (SearchScope scope : List.of(SearchScope.OBJECT, SearchScope.SUBTREE)) {
+                List<Entry> entries = new ArrayList<>();
+                assertEquals(scope.name(), ResultCodeEnum.SUCCESS, search(connection, ALICE_DN, "(uid=bob)", scope, entries));
+                assertEquals(scope.name(), List.of(), dns(entries));
+            }
+            // User entries have no children
+            List<Entry> entries = new ArrayList<>();
+            assertEquals(ResultCodeEnum.SUCCESS, search(connection, ALICE_DN, "(objectClass=*)", SearchScope.ONELEVEL, entries));
+            assertEquals(List.of(), dns(entries));
+        }
+    }
+
+    @Test
+    public void testSearchOnUnknownBackendUserReturnsNoSuchObject() throws Exception {
+        startWithBackendUsers();
+
+        try (LdapConnection connection = new LdapNetworkConnection("localhost", port)) {
+            connection.bind();
+            for (SearchScope scope : List.of(SearchScope.OBJECT, SearchScope.ONELEVEL, SearchScope.SUBTREE)) {
+                List<Entry> entries = new ArrayList<>();
+                assertEquals(scope.name(), ResultCodeEnum.NO_SUCH_OBJECT,
+                        search(connection, "uid=ghost,ou=people," + BASE_DN, "(objectClass=*)", scope, entries));
+                assertEquals(scope.name(), List.of(), dns(entries));
+            }
+        }
+    }
+
+    /** Start the server with a file backend that serves alice and bob under the gateway base DN, like the LDAP proxy backend does. */
+    private void startWithBackendUsers() throws Exception {
+        Files.writeString(tempLdapFile.toPath(), "{\"users\":["
+                + "{\"username\":\"alice\",\"password\":\"alice-password\",\"cn\":\"Alice\",\"sn\":\"Smith\"},"
+                + "{\"username\":\"bob\",\"password\":\"bob-password\",\"cn\":\"Bob\",\"sn\":\"Jones\"}]}");
+        GatewayConfig mockConfig = EasyMock.createNiceMock(GatewayConfig.class);
+        expect(mockConfig.getGatewayDataDir()).andReturn(tempWorkDir.getParent()).anyTimes();
+        expect(mockConfig.getLDAPPort()).andReturn(port).anyTimes();
+        expect(mockConfig.getLDAPBaseDN()).andReturn(BASE_DN).anyTimes();
+        expect(mockConfig.getLDAPInterceptorNames()).andReturn(List.of("filebackend")).anyTimes();
+        expect(mockConfig.getLDAPBackendDataFile()).andReturn(tempLdapFile.getAbsolutePath()).anyTimes();
+        Map<String, String> backendConfig = createFileBackendInterceptorConfig();
+        backendConfig.put("baseDn", BASE_DN);
+        expect(mockConfig.getLDAPInterceptorConfig("filebackend")).andReturn(backendConfig).anyTimes();
+        replay(mockConfig);
+
+        serverManager.initialize(mockConfig);
+        serverManager.start();
+    }
+
+    /** Run a search, collect the returned entries and return the result code of the search. */
+    private static ResultCodeEnum search(LdapConnection connection, String base, String filter, SearchScope scope,
+                                         List<Entry> entries) throws Exception {
+        SearchRequest request = new SearchRequestImpl();
+        request.setBase(new Dn(base));
+        request.setFilter(filter);
+        request.setScope(scope);
+        request.addAttributes("*");
+        try (SearchCursor cursor = connection.search(request)) {
+            while (cursor.next()) {
+                Response response = cursor.get();
+                if (response instanceof SearchResultEntry) {
+                    entries.add(((SearchResultEntry) response).getEntry());
+                }
+            }
+            return cursor.getSearchResultDone().getLdapResult().getResultCode();
+        }
+    }
+
+    private static List<String> dns(List<Entry> entries) {
+        return entries.stream().map(entry -> entry.getDn().getName()).collect(Collectors.toList());
+    }
+
+    @Test
     public void testAnonymousStillAllowedWhenUnconfigured() throws Exception {
         GatewayConfig mockConfig = EasyMock.createNiceMock(GatewayConfig.class);
         expect(mockConfig.getGatewayDataDir()).andReturn(tempWorkDir.getParent()).anyTimes();
         expect(mockConfig.getLDAPPort()).andReturn(port).anyTimes();
-        expect(mockConfig.getLDAPBaseDN()).andReturn("dc=test,dc=com").anyTimes();
+        expect(mockConfig.getLDAPBaseDN()).andReturn(BASE_DN).anyTimes();
         expect(mockConfig.getLDAPInterceptorNames()).andReturn(List.of("filebackend")).anyTimes();
         expect(mockConfig.getLDAPBackendDataFile()).andReturn(tempLdapFile.getAbsolutePath()).anyTimes();
         expect(mockConfig.getLDAPInterceptorConfig("filebackend")).andReturn(createFileBackendInterceptorConfig()).anyTimes();
@@ -542,7 +890,7 @@ public class KnoxLDAPServerManagerTest {
         // No bind credentials configured -> anonymous access remains allowed (backward compatible).
         try (LdapConnection connection = new LdapNetworkConnection("localhost", port)) {
             connection.bind();
-            try (EntryCursor cursor = connection.search("dc=test,dc=com", "(objectClass=*)", SearchScope.SUBTREE)) {
+            try (EntryCursor cursor = connection.search(BASE_DN, "(objectClass=*)", SearchScope.SUBTREE)) {
                 assertTrue("Anonymous search should return at least one entry", cursor.next());
             }
         }
@@ -581,7 +929,7 @@ public class KnoxLDAPServerManagerTest {
         try (LdapNetworkConnection connection = new LdapNetworkConnection("localhost", port)) {
             connection.setTimeOut(5000);
             connection.bind();
-            try (EntryCursor cursor = connection.search("dc=test,dc=com", "(objectClass=*)", SearchScope.SUBTREE)) {
+            try (EntryCursor cursor = connection.search(BASE_DN, "(objectClass=*)", SearchScope.SUBTREE)) {
                 cursor.next();
             }
             fail("Plaintext access against an LDAPS-only transport should fail");
@@ -600,7 +948,7 @@ public class KnoxLDAPServerManagerTest {
         GatewayConfig mockConfig = EasyMock.createNiceMock(GatewayConfig.class);
         expect(mockConfig.getGatewayDataDir()).andReturn(tempWorkDir.getParent()).anyTimes();
         expect(mockConfig.getLDAPPort()).andReturn(port).anyTimes();
-        expect(mockConfig.getLDAPBaseDN()).andReturn("dc=test,dc=com").anyTimes();
+        expect(mockConfig.getLDAPBaseDN()).andReturn(BASE_DN).anyTimes();
         expect(mockConfig.getLDAPInterceptorNames()).andReturn(List.of("filebackend")).anyTimes();
         expect(mockConfig.getLDAPBackendDataFile()).andReturn(tempLdapFile.getAbsolutePath()).anyTimes();
         expect(mockConfig.getLDAPInterceptorConfig("filebackend")).andReturn(createFileBackendInterceptorConfig()).anyTimes();
@@ -659,11 +1007,15 @@ public class KnoxLDAPServerManagerTest {
     }
 
     private GatewayConfig createBindEnabledConfig() {
+        return createBindEnabledConfig(BIND_DN);
+    }
+
+    private GatewayConfig createBindEnabledConfig(String bindDn) {
         GatewayConfig mockConfig = EasyMock.createNiceMock(GatewayConfig.class);
         expect(mockConfig.getGatewayDataDir()).andReturn(tempWorkDir.getParent()).anyTimes();
         expect(mockConfig.getLDAPPort()).andReturn(port).anyTimes();
-        expect(mockConfig.getLDAPBaseDN()).andReturn("dc=test,dc=com").anyTimes();
-        expect(mockConfig.getLDAPBindUser()).andReturn(BIND_DN).anyTimes();
+        expect(mockConfig.getLDAPBaseDN()).andReturn(BASE_DN).anyTimes();
+        expect(mockConfig.getLDAPBindUser()).andReturn(bindDn).anyTimes();
         expect(mockConfig.getLDAPInterceptorNames()).andReturn(List.of("filebackend")).anyTimes();
         expect(mockConfig.getLDAPBackendDataFile()).andReturn(tempLdapFile.getAbsolutePath()).anyTimes();
         expect(mockConfig.getLDAPInterceptorConfig("filebackend")).andReturn(createFileBackendInterceptorConfig()).anyTimes();
@@ -690,7 +1042,7 @@ public class KnoxLDAPServerManagerTest {
         GatewayConfig mockConfig = EasyMock.createNiceMock(GatewayConfig.class);
         expect(mockConfig.getGatewayDataDir()).andReturn(tempWorkDir.getAbsolutePath()).anyTimes();
         expect(mockConfig.getLDAPPort()).andReturn(port).anyTimes();
-        expect(mockConfig.getLDAPBaseDN()).andReturn("dc=test,dc=com").anyTimes();
+        expect(mockConfig.getLDAPBaseDN()).andReturn(BASE_DN).anyTimes();
         expect(mockConfig.getLDAPInterceptorNames()).andReturn(List.of()).anyTimes();
         replay(mockConfig);
         return mockConfig;
@@ -724,6 +1076,39 @@ public class KnoxLDAPServerManagerTest {
         config.put("baseDn", "dc=file,dc=com");
         config.put("dataFile", tempLdapFile.getAbsolutePath());
         return config;
+    }
+
+    /**
+     * Makes the given (not yet replayed) alias service mock find no value for the given alias and counts the lookups.
+     * A nice mock does not fail on calls beyond {@code once()} / {@code times(n)}, so retries are verified by count.
+     */
+    private static AtomicInteger countNullLookups(AliasService aliasService, String alias) throws Exception {
+        final AtomicInteger lookups = new AtomicInteger();
+        expect(aliasService.getPasswordFromAliasForGateway(alias)).andAnswer(() -> {
+            lookups.incrementAndGet();
+            return null;
+        }).anyTimes();
+        return lookups;
+    }
+
+    /** Initialize the current server manager with a single "ldapbackend" interceptor using the given config. */
+    private void initializeWithLdapBackendConfig(Map<String, String> backendConfig) throws Exception {
+        initializeWithLdapBackendConfig(backendConfig, 0, 0);
+    }
+
+    /** Same as {@link #initializeWithLdapBackendConfig(Map)}, with the given backend password alias retry settings. */
+    private void initializeWithLdapBackendConfig(Map<String, String> backendConfig, int aliasRetryAttempts, int aliasRetryIntervalMs) throws Exception {
+        GatewayConfig mockConfig = EasyMock.createNiceMock(GatewayConfig.class);
+        expect(mockConfig.getLDAPBackendPasswordAliasRetryAttempts()).andReturn(aliasRetryAttempts).anyTimes();
+        expect(mockConfig.getLDAPBackendPasswordAliasRetryIntervalMs()).andReturn(aliasRetryIntervalMs).anyTimes();
+        expect(mockConfig.getGatewayDataDir()).andReturn(tempWorkDir.getParent()).anyTimes();
+        expect(mockConfig.getLDAPPort()).andReturn(port).anyTimes();
+        expect(mockConfig.getLDAPBaseDN()).andReturn("dc=proxy,dc=com").anyTimes();
+        expect(mockConfig.getLDAPInterceptorNames()).andReturn(List.of("ldapbackend")).anyTimes();
+        expect(mockConfig.getLDAPInterceptorConfig("ldapbackend")).andReturn(backendConfig).anyTimes();
+        replay(mockConfig);
+
+        serverManager.initialize(mockConfig);
     }
 
     private Map<String, String> createLdapBackendInterceptorConfig() {

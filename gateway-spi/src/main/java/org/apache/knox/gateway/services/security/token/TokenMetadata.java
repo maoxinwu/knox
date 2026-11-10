@@ -70,7 +70,6 @@ public class TokenMetadata {
   }
 
   public TokenMetadata(Map<String, String> metadataMap) {
-    this.metadataMap.clear();
     this.metadataMap.putAll(metadataMap);
   }
 
@@ -151,16 +150,37 @@ public class TokenMetadata {
 
   @JsonIgnore
   public boolean isKnoxSsoCookie() {
-    return getType() == null ? false : TokenMetadataType.KNOXSSO_COOKIE == TokenMetadataType.valueOf(getType());
+    return getType() != null && TokenMetadataType.KNOXSSO_COOKIE == TokenMetadataType.valueOf(getType());
   }
 
   @JsonIgnore
   public boolean isClientId() {
-    return getType() == null ? false : TokenMetadataType.CLIENT_ID == TokenMetadataType.valueOf(getType());
+    return getType() != null && TokenMetadataType.CLIENT_ID == TokenMetadataType.valueOf(getType());
+  }
+
+  @JsonIgnore
+  public boolean isAuthCode() {
+    return getType() != null && TokenMetadataType.AUTH_CODE == TokenMetadataType.valueOf(getType());
   }
 
   public String getType() {
     return getMetadata(TYPE);
+  }
+
+  /**
+   * @return the type of this token; tokens without (or with an unknown) type are treated as regular JWTs
+   */
+  @JsonIgnore
+  public TokenMetadataType getTokenType() {
+    final String type = getType();
+    if (type != null) {
+      try {
+        return TokenMetadataType.valueOf(type);
+      } catch (IllegalArgumentException e) {
+        // fall through
+      }
+    }
+    return TokenMetadataType.JWT;
   }
 
   public String toJSON() {

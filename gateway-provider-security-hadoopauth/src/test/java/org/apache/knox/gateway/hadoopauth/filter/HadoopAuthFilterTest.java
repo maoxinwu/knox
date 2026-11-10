@@ -38,6 +38,7 @@ import org.apache.knox.gateway.config.GatewayConfig;
 import org.apache.knox.gateway.context.ContextAttributes;
 import org.apache.knox.gateway.provider.federation.jwt.filter.AbstractJWTFilter;
 import org.apache.knox.gateway.provider.federation.jwt.filter.JWTFederationFilter;
+import org.apache.knox.gateway.provider.federation.jwt.filter.RequestAudienceValidatorService;
 import org.apache.knox.gateway.provider.federation.jwt.filter.SignatureVerificationCache;
 import org.apache.knox.gateway.security.SubjectUtils;
 import org.apache.knox.gateway.services.GatewayServices;
@@ -49,15 +50,15 @@ import org.junit.Assert;
 import org.junit.Test;
 
 import javax.security.auth.Subject;
-import javax.servlet.FilterChain;
-import javax.servlet.FilterConfig;
-import javax.servlet.ServletContext;
-import javax.servlet.ServletOutputStream;
-import javax.servlet.ServletRequest;
-import javax.servlet.ServletResponse;
-import javax.servlet.WriteListener;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.FilterConfig;
+import jakarta.servlet.ServletContext;
+import jakarta.servlet.ServletOutputStream;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletResponse;
+import jakarta.servlet.WriteListener;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.HashMap;
@@ -579,6 +580,11 @@ public class HadoopAuthFilterTest {
     expect(filterConfig.getInitParameter("hadoop.auth.unauthenticated.path.list")).andReturn(null).anyTimes();
     expect(filterConfig.getInitParameter("clusterName")).andReturn("topology1").anyTimes();
     expect(filterConfig.getInitParameter(JWT_INSTANCE_KEY_FALLBACK)).andReturn("false").anyTimes();
+    expect(filterConfig.getInitParameter(JWTFederationFilter.DELEGATION_SERVER_ENABLED)).andReturn("false").anyTimes();
+    expect(filterConfig.getInitParameter(JWTFederationFilter.DELEGATION_REQUESTED_SUBJECT_ENABLED)).andReturn("false").anyTimes();
+    expect(filterConfig.getInitParameter(JWTFederationFilter.DELEGATION_ENFORCE_REQUESTED_AUDIENCE_REQUIRED)).andReturn("false").anyTimes();
+    expect(filterConfig.getInitParameter(JWTFederationFilter.DELEGATION_ENFORCE_REQUESTED_AUDIENCE_MAX_ONE)).andReturn("false").anyTimes();
+    expect(filterConfig.getInitParameter(JWTFederationFilter.TOKEN_EXCHANGE_SAME_SUBJECT_REQUESTED_AUDIENCE_ENABLED)).andReturn("false").anyTimes();
     final boolean isJwtSupported = Boolean.parseBoolean(supportJwt);
     if (isJwtSupported) {
       expect(filterConfig.getInitParameter(JWTFederationFilter.KNOX_TOKEN_AUDIENCES)).andReturn(null).anyTimes();
@@ -587,13 +593,16 @@ public class HadoopAuthFilterTest {
       expect(filterConfig.getInitParameter(JWTFederationFilter.JWKS_URLS)).andReturn(null).anyTimes();
       expect(filterConfig.getInitParameter(JWTFederationFilter.TOKEN_PRINCIPAL_CLAIM)).andReturn(null).anyTimes();
       expect(filterConfig.getInitParameter(JWTFederationFilter.TOKEN_VERIFICATION_PEM)).andReturn(null).anyTimes();
+      expect(filterConfig.getInitParameter(JWTFederationFilter.TOKEN_EXCHANGE_DYNAMIC_JWKS_ALLOW_HTTP)).andReturn(null).anyTimes();
       expect(filterConfig.getInitParameter(JWTFederationFilter.JWT_UNAUTHENTICATED_PATHS_PARAM)).andReturn(null).anyTimes();
       expect(filterConfig.getInitParameter(AbstractJWTFilter.JWT_EXPECTED_ISSUER)).andReturn(null).anyTimes();
       expect(filterConfig.getInitParameter(AbstractJWTFilter.JWT_EXPECTED_SIGALG)).andReturn(null).anyTimes();
+      expect(filterConfig.getInitParameter(AbstractJWTFilter.ALLOW_UNKNOWN_COOKIE_TOKEN_STATE)).andReturn(null).anyTimes();
       expect(filterConfig.getInitParameter(JWTFederationFilter.ALLOWED_JWS_TYPES)).andReturn(null).anyTimes();
       expect(filterConfig.getInitParameter(SignatureVerificationCache.TOKENS_VERIFIED_CACHE_MAX)).andReturn(null).anyTimes();
       expect(filterConfig.getInitParameter(JWTFederationFilter.KNOX_TOKEN_USE_COOKIE)).andReturn(null).anyTimes();
       expect(filterConfig.getInitParameter(JWTFederationFilter.KNOX_TOKEN_COOKIE_NAME)).andReturn(null).anyTimes();
+      expect(filterConfig.getInitParameter(RequestAudienceValidatorService.REQUEST_AUDIENCE_VALIDATOR_PARAM)).andReturn(null).anyTimes();
     }
 
     final ServletContext servletContext = createMock(ServletContext.class);

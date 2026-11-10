@@ -18,6 +18,7 @@ package org.apache.knox.gateway.services.security.token.impl;
 
 import java.net.URISyntaxException;
 import java.text.ParseException;
+import java.time.Instant;
 import java.util.Date;
 import java.util.Map;
 import java.util.UUID;
@@ -84,6 +85,7 @@ public class JWTToken implements JWT {
     }
     JWTClaimsSet claims;
     JWTClaimsSet.Builder builder = new JWTClaimsSet.Builder()
+            .issueTime(Date.from(Instant.ofEpochMilli(jwtAttributes.getIssueTime())))
             .issuer(jwtAttributes.getIssuer())
             .subject(jwtAttributes.getUserName())
             .audience(jwtAttributes.getAudiences());
@@ -110,10 +112,19 @@ public class JWTToken implements JWT {
       builder.claim(ACT_CLAIM, nestedAct);
     }
 
-    // Add a private UUID claim for uniqueness
-    builder.claim(KNOX_ID_CLAIM, String.valueOf(UUID.randomUUID()));
+    // Add the knox.id claim: a caller-supplied token id (e.g. a user-chosen client_id) when
+    // present, otherwise a random UUID for uniqueness.
+    final String requestedTokenId = jwtAttributes.getTokenId();
+    final String knoxId = (requestedTokenId == null || requestedTokenId.isEmpty())
+        ? String.valueOf(UUID.randomUUID()) : requestedTokenId;
+    builder.claim(KNOX_ID_CLAIM, knoxId);
 
     builder.claim(MANAGED_TOKEN_CLAIM, String.valueOf(jwtAttributes.isManaged()));
+
+    if (jwtAttributes.getCustomAttributes() != null) {
+      jwtAttributes.getCustomAttributes().forEach(builder::claim);
+    }
+
     claims = builder.build();
 
     jwt = new SignedJWT(header, claims);
@@ -146,6 +157,16 @@ public class JWTToken implements JWT {
       log.unableToParseToken(e);
     }
     return c;
+  }
+
+  @Override
+  public JWTClaimsSet getJWTClaimsSet() {
+    try {
+      return jwt.getJWTClaimsSet();
+    } catch (ParseException e) {
+      log.unableToParseToken(e);
+      return null;
+    }
   }
 
   @Override

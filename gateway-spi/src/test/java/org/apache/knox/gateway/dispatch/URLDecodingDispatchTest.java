@@ -20,7 +20,7 @@ import org.apache.knox.test.TestUtils;
 import org.easymock.EasyMock;
 import org.junit.Test;
 
-import javax.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletRequest;
 import java.net.URI;
 
 import static org.hamcrest.CoreMatchers.is;
@@ -57,5 +57,35 @@ public class URLDecodingDispatchTest {
     uri = dispatch.getDispatchUrl(request);
     assertThat(uri.toASCIIString(),
         is("https://localhost:8443/gateway/sandbox/datanode/datanode.html?host=http://localhost:9864"));
+  }
+
+  private URI dispatchUrlFor(final String url) {
+    request = EasyMock.createNiceMock(HttpServletRequest.class);
+    EasyMock.expect(request.getRequestURL()).andReturn(new StringBuffer(url)).anyTimes();
+    EasyMock.expect(request.getQueryString()).andReturn(null).anyTimes();
+    EasyMock.replay(request);
+    return dispatch.getDispatchUrl(request);
+  }
+
+  @Test(timeout = TestUtils.MEDIUM_TIMEOUT)
+  public void testEncodedDotSegmentsAreNormalized() {
+    URI uri = dispatchUrlFor("https://localhost:8443/gateway/sandbox/datanode/a/b/%2e%2e/c.html");
+    assertThat(uri.toASCIIString(), is("https://localhost:8443/gateway/sandbox/datanode/a/c.html"));
+
+    uri = dispatchUrlFor("https://localhost:8443/gateway/sandbox/datanode/a/%2e%2e%2fc.html");
+    assertThat(uri.toASCIIString(), is("https://localhost:8443/gateway/sandbox/datanode/c.html"));
+
+    uri = dispatchUrlFor("https://localhost:8443/gateway/sandbox/datanode/./a.html");
+    assertThat(uri.toASCIIString(), is("https://localhost:8443/gateway/sandbox/datanode/a.html"));
+  }
+
+  @Test(timeout = TestUtils.MEDIUM_TIMEOUT, expected = IllegalArgumentException.class)
+  public void testEncodedTraversalAboveRootIsRejected() {
+    dispatchUrlFor("https://localhost:8443/%2e%2e/%2e%2e/etc/passwd");
+  }
+
+  @Test(timeout = TestUtils.MEDIUM_TIMEOUT, expected = IllegalArgumentException.class)
+  public void testTraversalAboveRootIsRejected() {
+    dispatchUrlFor("https://localhost:8443/../etc/passwd");
   }
 }

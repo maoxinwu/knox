@@ -42,7 +42,7 @@ velocity.log
 
 # Workflow rules
 .github/workflows/compose/logs/*
-.github/workflows/tests/test-results.xml
+.github/workflows/tests/test-results*.xml
 
 
 # other IDEs and editors
@@ -53,5 +53,8 @@ velocity.log
 #System Files
 Thumbs.db
 
-# Test-generated keystore files (accidentally tracked; see KNOX-3328)
-gateway-server/data/security/keystores/*.jceks
+# Runtime-generated security material (master secret, keystores, credential stores; see KNOX-3328, KNOX-3453)
+gateway-server/data/security/
+
+# Generated MkDocs build output
+knox-site/site/

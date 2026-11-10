@@ -60,6 +60,8 @@ import org.apache.knox.gateway.topology.discovery.cm.model.hive.WebHCatServiceMo
 import org.apache.knox.gateway.topology.discovery.cm.model.impala.ImpalaServiceModelGenerator;
 import org.apache.knox.gateway.topology.discovery.cm.model.impala.ImpalaUIServiceModelGenerator;
 import org.apache.knox.gateway.topology.discovery.cm.model.kudu.KuduUIServiceModelGenerator;
+import org.apache.knox.gateway.topology.discovery.cm.model.livy.LivyForSpark3ServiceModelGenerator;
+import org.apache.knox.gateway.topology.discovery.cm.model.livy.LivyForSpark4ServiceModelGenerator;
 import org.apache.knox.gateway.topology.discovery.cm.model.livy.LivyServiceModelGenerator;
 import org.apache.knox.gateway.topology.discovery.cm.model.nifi.NifiRegistryServiceModelGenerator;
 import org.apache.knox.gateway.topology.discovery.cm.model.nifi.NifiServiceModelGenerator;
@@ -68,6 +70,7 @@ import org.apache.knox.gateway.topology.discovery.cm.model.phoenix.PhoenixServic
 import org.apache.knox.gateway.topology.discovery.cm.model.ranger.RangerServiceModelGenerator;
 import org.apache.knox.gateway.topology.discovery.cm.model.solr.SolrServiceModelGenerator;
 import org.apache.knox.gateway.topology.discovery.cm.model.spark.Spark3HistoryUIServiceModelGenerator;
+import org.apache.knox.gateway.topology.discovery.cm.model.spark.Spark4HistoryUIServiceModelGenerator;
 import org.apache.knox.gateway.topology.discovery.cm.model.spark.SparkHistoryUIServiceModelGenerator;
 import org.apache.knox.gateway.topology.discovery.cm.model.zeppelin.ZeppelinServiceModelGenerator;
 import org.apache.knox.gateway.topology.discovery.cm.monitor.ClouderaManagerClusterConfigurationMonitor;
@@ -598,6 +601,54 @@ public class ClouderaManagerServiceDiscoveryTest {
   }
 
   @Test
+  public void testLivyForSpark3Discovery() {
+    final String hostName    = "livy-host";
+    final String port        = "28998";
+    ServiceDiscovery.Cluster cluster = doTestLivyForSpark3Discovery(hostName, port, false);
+    assertNotNull(cluster);
+    List<String> livyURLs = cluster.getServiceURLs("LIVY_FOR_SPARK3");
+    assertNotNull(livyURLs);
+    assertEquals(1, livyURLs.size());
+    assertEquals("http://" + hostName + ":" + port, livyURLs.get(0));
+  }
+
+  @Test
+  public void testLivyForSpark3DiscoverySSL() {
+    final String hostName    = "livy-host";
+    final String port        = "28998";
+    ServiceDiscovery.Cluster cluster = doTestLivyForSpark3Discovery(hostName, port, true);
+    assertNotNull(cluster);
+    List<String> livyURLs = cluster.getServiceURLs("LIVY_FOR_SPARK3");
+    assertNotNull(livyURLs);
+    assertEquals(1, livyURLs.size());
+    assertEquals("https://" + hostName + ":" + port, livyURLs.get(0));
+  }
+
+  @Test
+  public void testLivyForSpark4Discovery() {
+    final String hostName    = "livy-host";
+    final String port        = "29998";
+    ServiceDiscovery.Cluster cluster = doTestLivyForSpark4Discovery(hostName, port, false);
+    assertNotNull(cluster);
+    List<String> livyURLs = cluster.getServiceURLs("LIVY_FOR_SPARK4");
+    assertNotNull(livyURLs);
+    assertEquals(1, livyURLs.size());
+    assertEquals("http://" + hostName + ":" + port, livyURLs.get(0));
+  }
+
+  @Test
+  public void testLivyForSpark4DiscoverySSL() {
+    final String hostName    = "livy-host";
+    final String port        = "29998";
+    ServiceDiscovery.Cluster cluster = doTestLivyForSpark4Discovery(hostName, port, true);
+    assertNotNull(cluster);
+    List<String> livyURLs = cluster.getServiceURLs("LIVY_FOR_SPARK4");
+    assertNotNull(livyURLs);
+    assertEquals(1, livyURLs.size());
+    assertEquals("https://" + hostName + ":" + port, livyURLs.get(0));
+  }
+
+  @Test
   public void testPhoenixDiscovery() {
     final String hostName    = "phoenix-host";
     final String port        = "8765";
@@ -743,6 +794,16 @@ public class ClouderaManagerServiceDiscoveryTest {
   @Test
   public void testSpark3HistoryUIDiscoverySSL() {
     doTestSpark3HistoryUIDiscovery("spark-history-host", "18089", "18489", true);
+  }
+
+  @Test
+  public void testSpark4HistoryUIDiscovery() {
+    doTestSpark4HistoryUIDiscovery("spark-history-host", "18090", "18490", false);
+  }
+
+  @Test
+  public void testSpark4HistoryUIDiscoverySSL() {
+    doTestSpark4HistoryUIDiscovery("spark-history-host", "18090", "18490", true);
   }
 
   @Test
@@ -1184,6 +1245,21 @@ public class ClouderaManagerServiceDiscoveryTest {
                            roleProperties);
   }
 
+  private ServiceDiscovery.Cluster doTestSpark4HistoryUIDiscovery(final String  hostName,
+                                                                  final String  port,
+                                                                  final String  sslPort,
+                                                                  final boolean isSSL) {
+    Map<String, String> roleProperties = sparkHistoryUIRoleProperties(port, sslPort, isSSL);
+
+    return doTestDiscovery(hostName,
+                           "SPARK4_ON_YARN-1",
+                           Spark4HistoryUIServiceModelGenerator.SERVICE_TYPE,
+                           "SPAR4fcf419a-SPARK4_YARN_HISTORY_SERVER-12345",
+                           Spark4HistoryUIServiceModelGenerator.ROLE_TYPE,
+                           Collections.emptyMap(),
+                           roleProperties);
+  }
+
   private Map<String, String> sparkHistoryUIRoleProperties(final String  port,
                                                            final String  sslPort,
                                                            final boolean isSSL) {
@@ -1416,6 +1492,39 @@ public class ClouderaManagerServiceDiscoveryTest {
                            roleProperties);
   }
 
+  private ServiceDiscovery.Cluster doTestLivyForSpark3Discovery(final String  hostName,
+                                                       final String  port,
+                                                       final Boolean isSSL) {
+    // Configure the role
+    Map<String, String> roleProperties = new HashMap<>();
+    roleProperties.put("livy_server_port", port);
+    roleProperties.put("ssl_enabled", String.valueOf(isSSL));
+
+    return doTestDiscovery(hostName,
+            "LIVY_FOR_SPARK3-1",
+            LivyForSpark3ServiceModelGenerator.SERVICE_TYPE,
+            "LIVY_FOR_SPARK3-LIVY_SERVER_FOR_SPARK3-1",
+            LivyForSpark3ServiceModelGenerator.ROLE_TYPE,
+            Collections.emptyMap(),
+            roleProperties);
+  }
+
+  private ServiceDiscovery.Cluster doTestLivyForSpark4Discovery(final String  hostName,
+                                                       final String  port,
+                                                       final Boolean isSSL) {
+    // Configure the role
+    Map<String, String> roleProperties = new HashMap<>();
+    roleProperties.put("livy_server_port", port);
+    roleProperties.put("ssl_enabled", String.valueOf(isSSL));
+
+    return doTestDiscovery(hostName,
+            "LIVY_FOR_SPARK4-1",
+            LivyForSpark4ServiceModelGenerator.SERVICE_TYPE,
+            "LIVY_FOR_SPARK4-LIVY_SERVER_FOR_SPARK4-1",
+            LivyForSpark4ServiceModelGenerator.ROLE_TYPE,
+            Collections.emptyMap(),
+            roleProperties);
+  }
 
   private ServiceDiscovery.Cluster doTestPhoenixDiscovery(final String hostName,
                                                           final String port,

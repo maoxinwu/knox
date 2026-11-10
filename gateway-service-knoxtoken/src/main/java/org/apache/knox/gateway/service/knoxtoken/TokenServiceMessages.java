@@ -77,6 +77,9 @@ public interface TokenServiceMessages {
   @Message( level = MessageLevel.ERROR, text = "Knox Token service ({0}) rejected a bad set enabled flag request for token {1}: {2}")
   void badSetEnabledFlagRequest(String topologyName, String tokenId, String error);
 
+  @Message( level = MessageLevel.ERROR, text = "Knox Token service ({0}) rejected an unauthorized getUserTokens request from caller ({1})")
+  void unauthorizedGetUserTokensRequest(String topologyName, String caller);
+
   @Message( level = MessageLevel.DEBUG, text = "Knox Token service ({0}) stored state for token {1} ({2})")
   void storedToken(String topologyName, String tokenDisplayText, String tokenId);
 
@@ -101,5 +104,14 @@ public interface TokenServiceMessages {
 
   @Message( level = MessageLevel.DEBUG, text = "Adding RFC 8693 'act' claim to token: actor={0}, subject={1}" )
   void addingActorClaimToToken(String actor, String subject);
+
+  @Message( level = MessageLevel.WARN, text = "Rejected token request due to invalid requested resource: {0}" )
+  void rejectedAudienceRequest(String reason);
+
+  @Message( level = MessageLevel.WARN, text = "Rejected RFC 8693 token exchange: resulting actor chain depth {0} exceeds the configured maximum of {1}" )
+  void actorChainDepthExceeded(int resultingDepth, int maxDepth);
+
+  @Message( level = MessageLevel.WARN, text = "Rejected RFC 8693 token exchange: {0}" )
+  void rejectedTokenExchange(String reason);
 
 }

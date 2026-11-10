@@ -20,9 +20,11 @@ package org.apache.knox.gateway.services.token.impl;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.knox.gateway.config.GatewayConfig;
 import org.apache.knox.gateway.database.DataSourceProvider;
+import org.apache.knox.gateway.database.JDBCUtils;
 import org.apache.knox.gateway.services.ServiceLifecycleException;
 import org.apache.knox.gateway.services.security.AliasService;
 import org.apache.knox.gateway.services.security.token.KnoxToken;
+import org.apache.knox.gateway.services.security.token.TokenAlreadyExistsException;
 import org.apache.knox.gateway.services.security.token.TokenMetadata;
 import org.apache.knox.gateway.services.security.token.TokenMigrationTarget;
 import org.apache.knox.gateway.services.security.token.TokenStateServiceException;
@@ -106,20 +108,25 @@ public class JDBCTokenStateService extends AbstractPersistentTokenStateService i
 
   @Override
   public void addToken(String tokenId, long issueTime, long expiration, long maxLifetimeDuration) {
+    final String displayableTokenId = Tokens.getTokenIDDisplayText(tokenId);
     try {
       final boolean added = tokenDatabase.addToken(tokenId, issueTime, expiration, maxLifetimeDuration);
       if (added) {
-        log.savedTokenInDatabase(Tokens.getTokenIDDisplayText(tokenId));
+        log.savedTokenInDatabase(displayableTokenId);
 
         // add in-memory
         super.addToken(tokenId, issueTime, expiration, maxLifetimeDuration);
       } else {
-        log.failedToSaveTokenInDatabase(Tokens.getTokenIDDisplayText(tokenId));
-        throw new TokenStateServiceException("Failed to save token " + Tokens.getTokenIDDisplayText(tokenId) + " in the database");
+        log.failedToSaveTokenInDatabase(displayableTokenId);
+        throw new TokenStateServiceException("Failed to save token " + displayableTokenId + " in the database");
       }
     } catch (SQLException e) {
-      log.errorSavingTokenInDatabase(Tokens.getTokenIDDisplayText(tokenId), e.getMessage(), e);
-      throw new TokenStateServiceException("An error occurred while saving token " + Tokens.getTokenIDDisplayText(tokenId) + " in the database", e);
+      if (JDBCUtils.isUniqueConstraintViolation(e)) {
+        log.tokenAlreadyExistsInDatabase(displayableTokenId);
+        throw new TokenAlreadyExistsException("A token with id " + displayableTokenId + " already exists", e);
+      }
+      log.errorSavingTokenInDatabase(displayableTokenId, e.getMessage(), e);
+      throw new TokenStateServiceException("An error occurred while saving token " + displayableTokenId + " in the database", e);
     }
   }
 
@@ -237,6 +244,25 @@ public class JDBCTokenStateService extends AbstractPersistentTokenStateService i
       }
     } catch (SQLException e) {
       log.errorRemovingTokenFromDatabase(Tokens.getTokenIDDisplayText(tokenId), e.getMessage(), e);
+    }
+  }
+
+  @Override
+  public boolean consumeToken(String tokenId) {
+    // The single-row primary-key DELETE is the atomic arbiter: only the caller whose statement
+    // actually removed the row observes rowsAffected == 1, so exactly one concurrent redemption
+    // wins. Fail closed on a SQL error (report "not consumed by us") rather than the inherited
+    // removeToken() behaviour of swallowing the exception, which would falsely signal a win.
+    try {
+      final boolean removed = tokenDatabase.removeToken(tokenId);
+      if (removed) {
+        super.removeTokens(Collections.singleton(tokenId)); // evict the in-memory cache copy
+        log.removedTokenFromDatabase(Tokens.getTokenIDDisplayText(tokenId));
+      }
+      return removed;
+    } catch (SQLException e) {
+      log.errorRemovingTokenFromDatabase(Tokens.getTokenIDDisplayText(tokenId), e.getMessage(), e);
+      return false;
     }
   }
 

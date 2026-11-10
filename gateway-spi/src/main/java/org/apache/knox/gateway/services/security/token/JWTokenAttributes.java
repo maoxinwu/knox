@@ -29,6 +29,7 @@ public class JWTokenAttributes {
   public static final String DEFAULT_TYPE = "JWT";
   private final String userName;
   private final List<String> audiences;
+  private final long issueTime;
   private final String algorithm;
   private final long expires;
   private final String signingKeystoreName;
@@ -42,22 +43,16 @@ public class JWTokenAttributes {
   private String kid;
   private final String clientId;
   private final List<Map<String, Object>> actorChain;
+  private final Map<String, Object> customAttributes;
+  private final String tokenId;
 
-  JWTokenAttributes(String userName, List<String> audiences, String algorithm, long expires, String signingKeystoreName, String signingKeystoreAlias,
-      char[] signingKeystorePassphrase, boolean managed, String jku, String type, Set<String> groups, String kid, String issuer) {
-    this(userName, audiences, algorithm, expires, signingKeystoreName, signingKeystoreAlias, signingKeystorePassphrase, managed, jku, type, groups, kid, issuer, null);
-  }
-
-  JWTokenAttributes(String userName, List<String> audiences, String algorithm, long expires, String signingKeystoreName, String signingKeystoreAlias,
-      char[] signingKeystorePassphrase, boolean managed, String jku, String type, Set<String> groups, String kid, String issuer, String clientId) {
-    this(userName, audiences, algorithm, expires, signingKeystoreName, signingKeystoreAlias, signingKeystorePassphrase, managed, jku, type, groups, kid, issuer, clientId, null);
-  }
-
-  JWTokenAttributes(String userName, List<String> audiences, String algorithm, long expires, String signingKeystoreName, String signingKeystoreAlias,
-      char[] signingKeystorePassphrase, boolean managed, String jku, String type, Set<String> groups, String kid, String issuer, String clientId, List<Map<String, Object>> actorChain) {
+  JWTokenAttributes(String userName, List<String> audiences, String algorithm, long issueTime, long expires, String signingKeystoreName, String signingKeystoreAlias,
+      char[] signingKeystorePassphrase, boolean managed, String jku, String type, Set<String> groups, String kid, String issuer, String clientId, List<Map<String, Object>> actorChain,
+                    Map<String, Object> customAttributes, String tokenId) {
     this.userName = userName;
     this.audiences = audiences;
     this.algorithm = algorithm;
+    this.issueTime = issueTime;
     this.expires = expires;
     this.signingKeystoreName = signingKeystoreName;
     this.signingKeystoreAlias = signingKeystoreAlias;
@@ -70,77 +65,82 @@ public class JWTokenAttributes {
     this.issuer = issuer;
     this.clientId = clientId;
     this.actorChain = actorChain;
+    this.customAttributes = customAttributes;
+    this.tokenId = tokenId;
   }
+    public String getUserName() {
+        return userName;
+    }
 
-  public String getUserName() {
-    return userName;
-  }
+    public List<String> getAudiences() {
+        return audiences;
+    }
 
-  public List<String> getAudiences() {
-    return audiences;
-  }
+    public String getAlgorithm() {
+        return algorithm;
+    }
 
-  public String getAlgorithm() {
-    return algorithm;
-  }
+    public long getIssueTime() {
+        return issueTime;
+    }
 
-  public long getExpires() {
-    return expires;
-  }
+    public long getExpires() {
+        return expires;
+    }
 
-  public Date getExpiresDate() {
-    return expires == -1 ? null : new Date(expires);
-  }
+    public Date getExpiresDate() {
+        return expires == -1 ? null : new Date(expires);
+    }
 
-  public String getSigningKeystoreName() {
-    return signingKeystoreName;
-  }
+    public String getSigningKeystoreName() {
+        return signingKeystoreName;
+    }
 
-  public String getSigningKeystoreAlias() {
-    return signingKeystoreAlias;
-  }
+    public String getSigningKeystoreAlias() {
+        return signingKeystoreAlias;
+    }
 
-  public char[] getSigningKeystorePassphrase() {
-    return signingKeystorePassphrase;
-  }
+    public char[] getSigningKeystorePassphrase() {
+        return signingKeystorePassphrase;
+    }
 
-  public boolean isManaged() {
-    return managed;
-  }
+    public boolean isManaged() {
+        return managed;
+    }
 
-  public URI getJkuUri() throws URISyntaxException {
-    return jku != null ? new URI(jku) : null;
-  }
+    public URI getJkuUri() throws URISyntaxException {
+        return jku != null ? new URI(jku) : null;
+    }
 
-  public String getJku(){
-    return jku;
-  }
+    public String getJku() {
+        return jku;
+    }
 
-  public void setJku(String jku) {
-    this.jku = jku;
-  }
+    public void setJku(String jku) {
+        this.jku = jku;
+    }
 
-  public String getType() {
-    return type;
-  }
+    public String getType() {
+        return type;
+    }
 
-  public Set<String> getGroups() {
-    return groups;
-  }
+    public Set<String> getGroups() {
+        return groups;
+    }
 
-  public void setKid(String kid) {
-    this.kid = kid;
-  }
+    public void setKid(String kid) {
+        this.kid = kid;
+    }
 
-  public String getKid() {
-    return kid;
-  }
+    public String getKid() {
+        return kid;
+    }
 
-  public String getIssuer() {
-    return issuer;
-  }
+    public String getIssuer() {
+        return issuer;
+    }
 
-  public String getClientId() {
+    public String getClientId() {
     return clientId;
   }
 
@@ -166,5 +166,14 @@ public class JWTokenAttributes {
    */
   public List<Map<String, Object>> getActorChain() {
     return actorChain;
+  }
+
+  public Map<String, Object> getCustomAttributes() {
+      return customAttributes;
+  }
+
+  /** The requested {@code knox.id}/{@code token_id}, or null to let {@code JWTToken} generate a UUID. */
+  public String getTokenId() {
+    return tokenId;
   }
 }

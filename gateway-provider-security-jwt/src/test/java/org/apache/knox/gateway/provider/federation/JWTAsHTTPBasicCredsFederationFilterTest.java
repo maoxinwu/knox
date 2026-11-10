@@ -28,9 +28,9 @@ import java.util.Properties;
 
 import com.nimbusds.jwt.SignedJWT;
 
-import javax.servlet.ServletException;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 
 import org.junit.Assert;
 import org.junit.Before;
@@ -80,7 +80,7 @@ public class JWTAsHTTPBasicCredsFederationFilterTest extends AbstractJWTFilterTe
         final byte[] basicAuth =
                 (authUsername + ":" + (authPassword != null ? authPassword : "")).getBytes(StandardCharsets.UTF_8);
         final String authHeaderValue = "Basic " + Base64.getEncoder().encodeToString(basicAuth);
-        EasyMock.expect((Object)request.getHeader("Authorization")).andReturn(authHeaderValue);
+        EasyMock.expect((Object)request.getHeader("Authorization")).andReturn(authHeaderValue).anyTimes();
     }
 
     @Test

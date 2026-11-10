@@ -19,6 +19,7 @@ package org.apache.knox.gateway.services.ldap.backend;
 
 import static java.util.Locale.ROOT;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.directory.api.ldap.model.cursor.CursorException;
 import org.apache.directory.api.ldap.model.cursor.EntryCursor;
 import org.apache.directory.api.ldap.model.cursor.SearchCursor;
@@ -27,7 +28,14 @@ import org.apache.directory.api.ldap.model.entry.DefaultEntry;
 import org.apache.directory.api.ldap.model.entry.Entry;
 import org.apache.directory.api.ldap.model.entry.Value;
 import org.apache.directory.api.ldap.model.exception.LdapException;
+import org.apache.directory.api.ldap.model.exception.LdapInvalidDnException;
+import org.apache.directory.api.ldap.model.exception.LdapNoSuchObjectException;
+import org.apache.directory.api.ldap.model.exception.LdapOperationException;
+import org.apache.directory.api.ldap.model.filter.ExprNode;
+import org.apache.directory.api.ldap.model.filter.FilterParser;
+import org.apache.directory.api.ldap.model.message.LdapResult;
 import org.apache.directory.api.ldap.model.message.Response;
+import org.apache.directory.api.ldap.model.message.ResultCodeEnum;
 import org.apache.directory.api.ldap.model.message.SearchRequest;
 import org.apache.directory.api.ldap.model.message.SearchRequestImpl;
 import org.apache.directory.api.ldap.model.message.SearchResultDone;
@@ -36,6 +44,7 @@ import org.apache.directory.api.ldap.model.message.SearchScope;
 import org.apache.directory.api.ldap.model.message.controls.PagedResults;
 import org.apache.directory.api.ldap.model.message.controls.PagedResultsImpl;
 import org.apache.directory.api.ldap.model.name.Dn;
+import org.apache.directory.api.ldap.model.schema.AttributeType;
 import org.apache.directory.api.ldap.model.schema.SchemaManager;
 import org.apache.directory.ldap.client.api.DefaultLdapConnectionFactory;
 import org.apache.directory.ldap.client.api.LdapConnection;
@@ -60,6 +69,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -73,26 +83,31 @@ import java.util.stream.Collectors;
 public class LdapProxyBackend implements LdapBackend {
     private static final LdapMessages LOG = MessagesFactory.get(LdapMessages.class);
 
+    private static final String[] ALL_ATTRIBUTES = new String[]{"*"};
+    private static final String[] ALL_ATTRIBUTES_AND_MEMBEROF = new String[]{"*", "memberOf"};
+
+    private static final String DEFAULT_MAX_FILTER_LENGTH = "0"; // unlimited
+
     static final String TYPE = "ldap";
 
-    private String name;
-    private String ldapUrl;
+    private final String name;
     private String bindDn;
     private String bindPassword;
     private int port;
     private String host;
 
-    private RemoteSchemaConverter remoteSchemaConverter;
+    private final RemoteSchemaConverter remoteSchemaConverter;
 
     // Proxy configuration
-    private String proxyBaseDn;  // Base DN for proxy entries (e.g., dc=proxy,dc=com)
-    private String proxyUserSearchBase;
-    private String proxyGroupSearchBase;
+    private final String proxyBaseDn;  // Base DN for proxy entries (e.g., dc=proxy,dc=com)
+    private final String proxyUserSearchBase;
+    private final String proxyGroupSearchBase;
+    private final boolean dnMappingEnabled;
 
     // Backend configuration
-    private String remoteBaseDn;  // Base DN for remote server searches (e.g., dc=hadoop,dc=apache,dc=org)
-    private String remoteUserSearchBase;
-    private String remoteGroupSearchBase;
+    private final String remoteBaseDn;  // Base DN for remote server searches (e.g., dc=hadoop,dc=apache,dc=org)
+    private final String remoteUserSearchBase;
+    private final String remoteGroupSearchBase;
 
     // Configurable attributes for AD/LDAP compatibility
     private String remoteUserIdentifierAttribute = "uid"; // uid for LDAP, sAMAccountName for AD
@@ -100,23 +115,24 @@ public class LdapProxyBackend implements LdapBackend {
     private String remoteGroupMemberAttribute = "memberUid"; // member for AD, memberUid for POSIX
     private String remoteUserObjectClass = "inetOrgPerson"; // user for AD, inetOrgPerson otherwise
     private String remoteGroupObjectClass = "groupofnames"; // group for AD, groupofnames otherwise
-    private boolean useMemberOf; // Use memberOf attribute for group lookup (efficient for AD)
-    private boolean recursiveGroupResolution;
-    private int recursiveGroupResolutionMaxDepth;
-    private int pageSize;
-    private int maxResultSetSize;
+    private final boolean useMemberOf; // Use memberOf attribute for group lookup (efficient for AD)
+    private final boolean recursiveGroupResolution;
+    private final int recursiveGroupResolutionMaxDepth;
+    private final int pageSize;
+    private final int maxResultSetSize;
+    private final int maxFilterLength;
 
     private final String proxyEntryGroupMembershipAttributeType = "memberOf";
 
     // Secure transport configuration for the connection to the remote LDAP server
-    private boolean useSsl;                  // LDAPS (implicit TLS)
-    private boolean trustAllCertificates;    // skip certificate validation (test/dev only)
-    private String trustStorePath;
-    private String trustStoreType;
-    private String trustStorePassword;
-    private String sslProtocol;
-    private String[] enabledProtocols;
-    private String[] enabledCipherSuites;
+    private final boolean useSsl;                  // LDAPS (implicit TLS)
+    private final boolean trustAllCertificates;    // skip certificate validation (test/dev only)
+    private final String trustStorePath;
+    private final String trustStoreType;
+    private final String trustStorePassword;
+    private final String sslProtocol;
+    private final String[] enabledProtocols;
+    private final String[] enabledCipherSuites;
     // LDAP response timeout in milliseconds; negative means use the client default.
     private long connectionTimeoutMillis = -1;
 
@@ -127,7 +143,7 @@ public class LdapProxyBackend implements LdapBackend {
         this.name = name;
 
         // Support both url and host/port configuration
-        ldapUrl = config.get("url");
+        String ldapUrl = config.get("url");
         if (ldapUrl != null && !ldapUrl.isEmpty()) {
             // Parse URL to extract host and port
             parseLdapUrl(ldapUrl);
@@ -164,6 +180,8 @@ public class LdapProxyBackend implements LdapBackend {
         proxyUserSearchBase = "ou=people," + proxyBaseDn;
         proxyGroupSearchBase = "ou=groups," + proxyBaseDn;
 
+        dnMappingEnabled = Boolean.parseBoolean(config.get("dnMappingEnabled"));
+
         // Remote base DN is for searching the remote LDAP server
         remoteBaseDn = config.get("remoteBaseDn");
         if (remoteBaseDn == null || remoteBaseDn.isEmpty()) {
@@ -186,7 +204,8 @@ public class LdapProxyBackend implements LdapBackend {
                 remoteGroupSearchBase,
                 remoteUserIdentifierAttribute,
                 remoteUserObjectClass,
-                remoteGroupObjectClass);
+                remoteGroupObjectClass,
+                dnMappingEnabled);
 
         // Configure group lookup
         useMemberOf = Boolean.parseBoolean(config.getOrDefault("useMemberOf", "false"));
@@ -197,8 +216,10 @@ public class LdapProxyBackend implements LdapBackend {
         pageSize = Integer.parseInt(config.getOrDefault("pageSize", "1000"));
         maxResultSetSize = Integer.parseInt(config.getOrDefault("maxResultSetSize", "0")); // 0 means unlimited
         LOG.ldapInterceptorConfiguring(name, "maxResultSetSize", Integer.toString(maxResultSetSize));
+        maxFilterLength = Integer.parseInt(config.getOrDefault("maxFilterLength", DEFAULT_MAX_FILTER_LENGTH)); // 0 means unlimited
+        LOG.ldapInterceptorConfiguring(name, "maxFilterLength", Integer.toString(maxFilterLength));
 
-        // Configure secure transport (LDAPS) to the remote server. An ldaps:// URL enables it
+        // Configure secure transport (LDAPS) to the remote server. A ldaps:// URL enables it
         // by default; an explicit useSsl setting always wins.
         final boolean ldapsFromUrl = ldapUrl != null && ldapUrl.toLowerCase(Locale.ROOT).startsWith("ldaps://");
         useSsl = Boolean.parseBoolean(config.getOrDefault("useSsl", String.valueOf(ldapsFromUrl)));
@@ -250,9 +271,13 @@ public class LdapProxyBackend implements LdapBackend {
         if (searchBase == null) {
             return false;
         }
-        String searchBaseLowerCase = searchBase.toLowerCase(ROOT);
-        return searchBaseLowerCase.endsWith(proxyBaseDn.toLowerCase(ROOT)) ||
-                searchBaseLowerCase.endsWith(remoteBaseDn.toLowerCase(ROOT));
+        try {
+            Dn searchBaseDn = new Dn(searchBase.toLowerCase(ROOT));
+            return searchBaseDn.isDescendantOf(proxyBaseDn.toLowerCase(ROOT)) ||
+                    searchBaseDn.isDescendantOf(remoteBaseDn.toLowerCase(ROOT));
+        } catch (LdapInvalidDnException e) {
+            return false;
+        }
     }
 
     /**
@@ -455,6 +480,11 @@ public class LdapProxyBackend implements LdapBackend {
     public boolean authenticate(Dn userDn, String password) {
         final String userDnText = userDn.toString(); //at this point we are sure it's not NULL
 
+        // Don't allow anonymous or unauthenticated bind
+        if (StringUtils.isBlank(userDnText) || StringUtils.isBlank(password)) {
+            return false;
+        }
+
         // if userDN is using proxy base DN then convert to remote base dn
         final String remoteUserDnText = remoteSchemaConverter.convertProxyDnToRemoteDn(userDnText);
 
@@ -468,10 +498,10 @@ public class LdapProxyBackend implements LdapBackend {
         authConfig.setCredentials(password);
         try (LdapConnection connection =  new LdapNetworkConnection(authConfig)){
             connection.bind();
-            LOG.ldapAuthSucceeded(userDnText);
+            LOG.ldapAuthSucceeded(getName(), userDnText);
             return true;
         } catch (Exception e) {
-            LOG.ldapAuthFailed(userDnText, e);
+            LOG.ldapAuthFailed(getName(), userDnText, e);
             return false;
         }
     }
@@ -483,13 +513,15 @@ public class LdapProxyBackend implements LdapBackend {
             connection = getConnection();
             // Search for user using configurable attribute
             String filter = userSearchFilter.replace("{username}", username);
+            Entry sourceEntry = null;
             try (EntryCursor cursor = connection.search(remoteUserSearchBase, filter, SearchScope.SUBTREE, "*")) {
                 if (cursor.next()) {
-                    Entry sourceEntry = cursor.get();
-                    addGroupMemberships(sourceEntry, connection, createEntryCache(), createResolvedParentsCache());
-                    return remoteSchemaConverter.convertRemoteEntryToProxyEntry(sourceEntry, schemaManager);
-
+                    sourceEntry = cursor.get();
                 }
+            }
+            if (sourceEntry != null) {
+                addGroupMemberships(sourceEntry, connection, createEntryCache(), createResolvedParentsCache());
+                return remoteSchemaConverter.convertRemoteEntryToProxyEntry(sourceEntry, schemaManager);
             }
             return null;
         } finally {
@@ -536,19 +568,40 @@ public class LdapProxyBackend implements LdapBackend {
     }
 
     @Override
-    public List<Entry> search(String searchBase, SearchScope searchScope, String filter, SchemaManager schemaManager) throws Exception {
+    public List<Entry> search(String searchBase, SearchScope searchScope, String filter, SchemaManager schemaManager, String[] attributes) throws Exception {
+        // Filter likely has already been annotated by other interceptors.
+        // Clean the filter by removing any modifications or annotations
+        String rawFilter = filter.replaceAll(":\\[.*?\\]", "").replaceAll("=\\s+", "=");
+        ExprNode filterNode = FilterParser.parse(schemaManager, rawFilter);
+
+        // NOTE: mapping memberOf must occur before schema conversion
+        filterNode = mapMemberOfExpression(filterNode, schemaManager);
+
         LdapConnection connection = null;
         String remoteSearchBase = remoteSchemaConverter.convertProxyDnToRemoteDn(searchBase);
-        String remoteFilter = remoteSchemaConverter.convertProxyFilterToRemoteFilter(filter, schemaManager);
+        ExprNode remoteFilter = remoteSchemaConverter.convertProxyFilterToRemoteFilter(filterNode, schemaManager);
         Map<String, Entry> entryCache = createEntryCache();
         Map<String, Set<String>> resolvedParentsCache = createResolvedParentsCache();
 
         try {
             connection = getConnection();
             List<Entry> results = new ArrayList<>();
-            List<Entry> searchResults = performPagedSearch(connection, remoteSearchBase, remoteFilter, searchScope, "*");
+            boolean memberOfRequested = isAttributeRequested(attributes, proxyEntryGroupMembershipAttributeType, schemaManager);
+            String[] remoteAttributes = memberOfRequested && useMemberOf ? ALL_ATTRIBUTES_AND_MEMBEROF : ALL_ATTRIBUTES;
+            List<Entry> searchResults;
+            try {
+                searchResults = performSplitSearch(connection, remoteSearchBase, splitFilter(remoteFilter.toString()), searchScope, remoteAttributes);
+            } catch (LdapOperationException e) {
+                if (e.getResultCode() == ResultCodeEnum.NO_SUCH_OBJECT) {
+                    // Tell the caller that the search base itself does not exist in the remote directory
+                    throw new LdapNoSuchObjectException("No such entry in backend " + name + ": " + searchBase + " (" + e.getMessage() + ")");
+                }
+                throw e;
+            }
             for (Entry entry : searchResults) {
-                addGroupMemberships(entry, connection, entryCache, resolvedParentsCache);
+                if (memberOfRequested) {
+                    addGroupMemberships(entry, connection, entryCache, resolvedParentsCache);
+                }
                 results.add(remoteSchemaConverter.convertRemoteEntryToProxyEntry(entry, schemaManager));
             }
             return results;
@@ -557,7 +610,89 @@ public class LdapProxyBackend implements LdapBackend {
         }
     }
 
-    private void addGroupMemberships(Entry entry, LdapConnection connection, Map<String, Entry> entryCache, Map<String, Set<String>> resolvedParentsCache) throws Exception {
+    /**
+     * Returns true if the requested attributes include the given attribute or "*". Requested
+     * attributes may be names or OIDs, so they are compared by attribute type OID via the schema.
+     * Null or empty attributes indicates all attributes (i.e., "*")
+     */
+    private static boolean isAttributeRequested(String[] requestedAttributes, String attribute, SchemaManager schemaManager) {
+        if (requestedAttributes == null || requestedAttributes.length == 0) {
+            return true;
+        }
+        final AttributeType attributeType = schemaManager.getAttributeType(attribute);
+        for (String requested : requestedAttributes) {
+            if ("*".equals(requested) || attribute.equalsIgnoreCase(requested)) {
+                return true;
+            }
+            if (attributeType != null && requested != null) {
+                final AttributeType requestedType = schemaManager.getAttributeType(requested);
+                if (requestedType != null && attributeType.getOid().equals(requestedType.getOid())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private ExprNode mapMemberOfExpression(ExprNode filter, SchemaManager schemaManager) throws Exception {
+        if (useMemberOf || !filter.toString().toLowerCase(ROOT).contains("memberof")) {
+            return filter;
+        }
+        // Convert filter if it contains "memberOf" but the backend doesn't support "memberOf"
+        MemberOfMappingVisitor visitor = new MemberOfMappingVisitor(schemaManager, this::lookupGroup, dn -> isUser(dn, schemaManager));
+        // Baseline in the same form as the visitor output so an unchanged visit exits on the first pass
+        String current = filter.toString();
+        int depth = recursiveGroupResolution ? recursiveGroupResolutionMaxDepth : 1;
+        for (int i = 0; i < depth; ++i) {
+            Object visitedNode;
+            try {
+                visitedNode = filter.accept(visitor);
+            } catch (Exception e) {
+                throw new LdapException("Failed to resolve group members of " + current, e);
+            }
+            if (!(visitedNode instanceof ExprNode)) {
+                throw new LdapException("Unable to transform memberOf expressions in filter: " + filter);
+            }
+            filter = (ExprNode) visitedNode;
+            String updated = filter.toString();
+            if (updated.equals(current)) {
+                break;
+            }
+            current = updated;
+        }
+        return filter;
+    }
+
+    private Entry lookupGroup(String dn, SchemaManager schemaManager) throws Exception {
+        String remoteDn = remoteSchemaConverter.convertProxyDnToRemoteDn(dn);
+        LdapConnection connection = null;
+        try {
+            connection = getConnection();
+            Entry entry = connection.lookup(remoteDn);
+            if  (entry != null) {
+                return remoteSchemaConverter.convertRemoteEntryToProxyEntry(entry, schemaManager);
+            } else {
+                return null;
+            }
+        } finally {
+            releaseConnection(connection);
+        }
+    }
+
+    private boolean isUser(String userDnString, SchemaManager schemaManager) {
+        if (userDnString == null) {
+            return false;
+        }
+        try {
+            Dn userDn = new Dn(schemaManager, userDnString);
+            return userDn.isDescendantOf(proxyUserSearchBase) ||
+                    userDn.isDescendantOf(remoteUserSearchBase);
+        } catch (LdapInvalidDnException e) {
+            return false;
+        }
+    }
+
+    private void addGroupMemberships(Entry entry, LdapConnection connection, Map<String, Entry> entryCache, Map<String, Set<String>> resolvedParentsCache) throws LdapException, CursorException, IOException {
         // The memberOf attribute is already populated on the entry. Further work is only needed
         // when using recursive group resolution or non using memberOf to find groups
         if (recursiveGroupResolution || !useMemberOf) {
@@ -568,7 +703,7 @@ public class LdapProxyBackend implements LdapBackend {
         }
     }
 
-    private List<Entry> getUserGroupsEntries(LdapConnection connection, Entry user, Map<String, Entry> entryCache, Map<String, Set<String>> resolvedParentsCache) throws Exception {
+    private List<Entry> getUserGroupsEntries(LdapConnection connection, Entry user, Map<String, Entry> entryCache, Map<String, Set<String>> resolvedParentsCache) throws LdapException, CursorException, IOException {
         List<Entry> groups = new ArrayList<>();
         if (useMemberOf) {
             // Use memberOf attribute for efficient AD lookups
@@ -594,7 +729,7 @@ public class LdapProxyBackend implements LdapBackend {
         return groups;
     }
 
-    private List<String> getGroupsViaMemberOf(LdapConnection connection, Entry entry, Map<String, Entry> entryCache, Map<String, Set<String>> resolvedParentsCache) throws LdapException, CursorException, IOException {
+    private List<String> getGroupsViaMemberOf(LdapConnection connection, Entry entry, Map<String, Entry> entryCache, Map<String, Set<String>> resolvedParentsCache) {
         final List<String> groupDns = new ArrayList<>();
         // Use the memberOf attribute of the given entry
         final Attribute memberOfAttr = entry.get("memberOf");
@@ -659,7 +794,7 @@ public class LdapProxyBackend implements LdapBackend {
                 groupEntry = null;
             }
             if (groupEntry == null) {
-                // Entry not found or lookup failed — synthesise a skeleton so cn is still known.
+                // Entry not found or lookup failed — synthesize a skeleton so cn is still known.
                 groupEntry = createSkeletonGroupEntry(groupDn);
             }
             entryCache.put(groupDn, groupEntry);
@@ -693,7 +828,7 @@ public class LdapProxyBackend implements LdapBackend {
             LOG.ldapSkeletonGroupEntryCreated(groupDn);
             return entry;
         } catch (LdapException e) {
-            LOG.ldapSearch(groupDn, "failed to create skeleton entry");
+            LOG.ldapSkeletonGroupEntryError(groupDn, e);
             return null;
         }
     }
@@ -726,9 +861,9 @@ public class LdapProxyBackend implements LdapBackend {
                 for (Entry group : groupsToSearch) {
                     groupDns.add(group.getDn());
                 }
-                String filter = buildMultipleGroupMemberFilter(groupDns.toArray(new Dn[0]));
+                List<String> filters = buildMultipleGroupMemberFilters(groupDns.toArray(new Dn[0]));
 
-                List<Entry> searchResults = performPagedSearch(connection, remoteGroupSearchBase, filter, SearchScope.SUBTREE, "cn", "memberUid", "member", "uniqueMember");
+                List<Entry> searchResults = performSplitSearch(connection, remoteGroupSearchBase, filters, SearchScope.SUBTREE, "cn", "memberUid", "member", "uniqueMember");
                 for (Entry parentGroup : searchResults) {
                     String parentDn = parentGroup.getDn().getNormName();
 
@@ -815,7 +950,7 @@ public class LdapProxyBackend implements LdapBackend {
 
     private void logRecursiveSearchProgressViaMemberOf(String entryName, List<String> groups, int depth) {
         LOG.ldapRecursiveGroupSearchProgress(entryName, groups.size(),
-                groups.stream().collect(Collectors.joining(",")),
+                String.join(",", groups),
                 depth);
     }
 
@@ -842,11 +977,53 @@ public class LdapProxyBackend implements LdapBackend {
             return groups;
         }
 
-        String filter = buildMultipleGroupMemberFilter(dns);
-
-        groups.addAll(performPagedSearch(connection, remoteGroupSearchBase, filter, SearchScope.SUBTREE, "cn"));
+        groups.addAll(performSplitSearch(connection, remoteGroupSearchBase, buildMultipleGroupMemberFilters(dns), SearchScope.SUBTREE, "cn"));
 
         return groups;
+    }
+
+    /**
+     * Splits a filter that exceeds maxFilterLength into several filters whose combined results are
+     * equivalent to the original filter. A filter that can't be split is returned as is.
+     */
+    private List<String> splitFilter(String filter) throws LdapException {
+        if (maxFilterLength <= 0 || filter.length() <= maxFilterLength) {
+            return List.of(filter);
+        }
+        try {
+            // Remote attributes may be unknown to the local schema so parse without a schema manager
+            List<ExprNode> pieces = FilterSplitter.split(FilterParser.parse(filter), maxFilterLength);
+            LOG.ldapFilterSplit(filter.length(), maxFilterLength, pieces.size());
+            return pieces.stream().map(ExprNode::toString).collect(Collectors.toList());
+        } catch (java.text.ParseException e) {
+            throw new LdapException("Unable to split oversized filter: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Executes each filter as a separate paged search and combines the results, removing entries
+     * returned by more than one query. Stops early once maxResultSetSize entries have been collected.
+     */
+    protected List<Entry> performSplitSearch(LdapConnection connection, String baseDn, List<String> filters, SearchScope scope, String... attributes) throws LdapException, CursorException, IOException {
+        if (filters.size() == 1) {
+            return performPagedSearch(connection, baseDn, filters.get(0), scope, attributes);
+        }
+        Map<String, Entry> combined = new LinkedHashMap<>();
+        for (String filter : filters) {
+            for (Entry entry : performPagedSearch(connection, baseDn, filter, scope, attributes)) {
+                combined.putIfAbsent(entry.getDn().getNormName(), entry);
+            }
+            if (maxResultSetSize != 0 && combined.size() >= maxResultSetSize) {
+                break;
+            }
+        }
+        if (maxResultSetSize == 0) {
+            return new ArrayList<>(combined.values());
+        } else {
+            return combined.values().stream()
+                    .limit(maxResultSetSize)
+                    .collect(Collectors.toList());
+        }
     }
 
     protected List<Entry> performPagedSearch(LdapConnection connection, String baseDn, String filter, SearchScope scope, String... attributes ) throws LdapException, CursorException, IOException {
@@ -887,12 +1064,21 @@ public class LdapProxyBackend implements LdapBackend {
                 }
                 if (cursor.isDone()) {
                     SearchResultDone done = cursor.getSearchResultDone();
-                    PagedResults responseControl = (PagedResults) done.getControl(PagedResults.OID);
 
-                    if (responseControl != null) {
-                        cookie = responseControl.getCookie();
+                    if (done != null) {
+                        LdapResult ldapResult = done.getLdapResult();
+                        if (ldapResult.getResultCode() != ResultCodeEnum.SUCCESS) {
+                            throw new LdapOperationException(ldapResult.getResultCode(), ldapResult.getDiagnosticMessage());
+                        }
+                        PagedResults responseControl = (PagedResults) done.getControl(PagedResults.OID);
+
+                        if (responseControl != null) {
+                            cookie = responseControl.getCookie();
+                        } else {
+                            cookie = null;
+                        }
                     } else {
-                        cookie = null;
+                        throw new LdapException("The LDAP search operation failed to complete fully.");
                     }
                 }
                 pageNumber++;
@@ -902,40 +1088,46 @@ public class LdapProxyBackend implements LdapBackend {
 
         if (maxResultSetSize != 0 && results.size() >= maxResultSetSize) {
             LOG.ldapPagedSearchExceededMaxResultSetSize(results.size(), maxResultSetSize);
+            return results.stream()
+                    .limit(maxResultSetSize)
+                    .collect(Collectors.toList());
         } else {
-            LOG.ldapPagedSearchCompleted(baseDn, filter);
+            LOG.ldapPagedSearchCompleted(baseDn, filter, results.size());
+            return results;
         }
-
-        return results;
     }
 
-    private String buildMultipleGroupMemberFilter(Dn... dns) {
-        StringBuilder filterBuilder = new StringBuilder();
-        filterBuilder.append("(|");
+    /**
+     * Builds the filters that find the groups the given DNs are members of. The DNs are spread over
+     * as many filters as needed to keep each filter within maxFilterLength.
+     */
+    private List<String> buildMultipleGroupMemberFilters(Dn... dns) {
+        List<String> filters = new ArrayList<>();
+        StringBuilder filterBuilder = new StringBuilder("(|");
+        boolean empty = true;
         for (Dn dn : dns) {
-            String dnString = dn.toString();
-            String rdnString = dn.getRdn().getValue();
-            // Search for groups where user is a member - build filter based on configuration
-            if ("member".equals(remoteGroupMemberAttribute)) {
-                // AD style - uses full DN
-                filterBuilder.append("(member=");
-                filterBuilder.append(dnString);
-                filterBuilder.append(")(uniqueMember=");
-                filterBuilder.append(dnString);
-                filterBuilder.append(")");
-            } else {
-                // POSIX style - uses username
-                filterBuilder.append("(memberUid=");
-                filterBuilder.append(rdnString);
-                filterBuilder.append(")(member=");
-                filterBuilder.append(dnString);
-                filterBuilder.append(")(uniqueMember=");
-                filterBuilder.append(dnString);
-                filterBuilder.append(")");
+            String clause = buildGroupMemberClause(dn);
+            // +1 for the closing parenthesis
+            if (!empty && maxFilterLength > 0 && filterBuilder.length() + clause.length() + 1 > maxFilterLength) {
+                filters.add(filterBuilder.append(")").toString());
+                filterBuilder = new StringBuilder("(|");
             }
+            filterBuilder.append(clause);
+            empty = false;
         }
-        filterBuilder.append(")");
-        return filterBuilder.toString();
+        filters.add(filterBuilder.append(")").toString());
+        return filters;
+    }
+
+    private String buildGroupMemberClause(Dn dn) {
+        String dnString = dn.toString();
+        // Search for groups where user is a member - build filter based on configuration
+        if ("member".equals(remoteGroupMemberAttribute)) {
+            // AD style - uses full DN
+            return "(member=" + dnString + ")(uniqueMember=" + dnString + ")";
+        }
+        // POSIX style - uses username
+        return "(memberUid=" + dn.getRdn().getValue() + ")(member=" + dnString + ")(uniqueMember=" + dnString + ")";
     }
 
     protected Map<String, Entry> createEntryCache() {

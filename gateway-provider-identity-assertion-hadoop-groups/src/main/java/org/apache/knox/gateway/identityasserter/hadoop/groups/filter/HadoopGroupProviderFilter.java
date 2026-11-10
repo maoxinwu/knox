@@ -19,11 +19,13 @@ package org.apache.knox.gateway.identityasserter.hadoop.groups.filter;
 
 import java.util.Enumeration;
 import java.util.List;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 import javax.security.auth.Subject;
-import javax.servlet.FilterConfig;
-import javax.servlet.ServletException;
-import javax.servlet.ServletRequest;
+import jakarta.servlet.FilterConfig;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.ServletRequest;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.LdapGroupsMapping;
@@ -35,6 +37,7 @@ import org.apache.hadoop.security.Groups;
 import org.apache.knox.gateway.services.GatewayServices;
 import org.apache.knox.gateway.services.ServiceType;
 import org.apache.knox.gateway.services.ldap.KnoxLDAPService;
+import org.apache.knox.gateway.services.ldap.UserGroupsLookupResult;
 
 /**
  * A filter that integrates the Hadoop {@link GroupMappingServiceProvider} for
@@ -52,6 +55,11 @@ public class HadoopGroupProviderFilter extends CommonIdentityAssertionFilter {
   static final String USE_LDAP_SERVICE = "use.ldap.service";
 
   /**
+   * A regex matching principals known not to exist in LDAP (e.g. workload identities): their groups are not looked up
+   */
+  static final String GROUP_LOOKUP_SKIP_PRINCIPAL_PATTERN = "group.lookup.skip.principal.pattern";
+
+  /**
    * Configuration object needed by for hadoop classes
    */
   private Configuration hadoopConfig;
@@ -63,6 +71,8 @@ public class HadoopGroupProviderFilter extends CommonIdentityAssertionFilter {
 
   private KnoxLDAPService ldapService;
 
+  private Pattern groupLookupSkipPattern;
+
   /* create an instance */
   public HadoopGroupProviderFilter() {
     super();
@@ -71,6 +81,16 @@ public class HadoopGroupProviderFilter extends CommonIdentityAssertionFilter {
   @Override
   public void init(final FilterConfig filterConfig) throws ServletException {
     super.init(filterConfig);
+
+    final String groupLookupSkipPatternString = filterConfig.getInitParameter(GROUP_LOOKUP_SKIP_PRINCIPAL_PATTERN);
+    if (groupLookupSkipPatternString != null && !groupLookupSkipPatternString.isBlank()) {
+      try {
+        groupLookupSkipPattern = Pattern.compile(groupLookupSkipPatternString);
+      } catch (final PatternSyntaxException e) {
+        throw new ServletException("Invalid " + GROUP_LOOKUP_SKIP_PRINCIPAL_PATTERN + ": " + groupLookupSkipPatternString, e);
+      }
+      LOG.groupLookupSkipPatternConfigured(groupLookupSkipPatternString);
+    }
 
     if (shouldUseLdapService(filterConfig)) {
       final GatewayServices services = (GatewayServices) filterConfig.getServletContext().getAttribute(GatewayServices.GATEWAY_SERVICES_ATTRIBUTE);
@@ -108,6 +128,12 @@ public class HadoopGroupProviderFilter extends CommonIdentityAssertionFilter {
    */
   @Override
   public String[] mapGroupPrincipals(final String mappedPrincipalName, final Subject subject, ServletRequest request) {
+    if (groupLookupSkipPattern != null && mappedPrincipalName != null && groupLookupSkipPattern.matcher(mappedPrincipalName).matches()) {
+      // Known not to be in LDAP: a lookup would only cost a round trip to find nothing
+      LOG.groupLookupSkipped(mappedPrincipalName, groupLookupSkipPattern.pattern());
+      return new String[0];
+    }
+
     /* return the groups as seen by Hadoop */
     String[] groups;
     try {
@@ -133,11 +159,18 @@ public class HadoopGroupProviderFilter extends CommonIdentityAssertionFilter {
       return hadoopGroups == null ? List.of() : hadoopGroups.getGroups(mappedPrincipalName);
     } else {
       LOG.useKnoxLDAPService();
-      final List<String> groups = ldapService.getUserGroups(mappedPrincipalName);
-      if (request != null && ldapService.hasRolesLookupInterceptor()) {
-        request.setAttribute(ROLES_LOOKUP_EXECUTED, Boolean.TRUE.toString());
+      final UserGroupsLookupResult result = ldapService.lookupUserGroups(mappedPrincipalName);
+      // Having the roles lookup interceptor configured is not enough: it only looks up roles for a user it
+      // finds in LDAP. Otherwise, leave the lookup to the downstream consumers (e.g. KNOX-AUTH-SERVICE).
+      if (result.rolesLookupApplied()) {
+        LOG.rolesLookupApplied(mappedPrincipalName);
+        if (request != null) {
+          request.setAttribute(ROLES_LOOKUP_EXECUTED, Boolean.TRUE.toString());
+        }
+      } else {
+        LOG.rolesLookupNotApplied(mappedPrincipalName);
       }
-      return groups;
+      return result.groups();
     }
   }
 

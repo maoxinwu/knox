@@ -14,11 +14,13 @@
 -->
 # Knox Authentication Theming System
 
-This directory contains theme files for customizing the appearance of the Knox authentication login page.
+This directory contains theme files for customizing the appearance of Knox authentication pages (`login.html` and `logout.jsp`).
 
 ## Overview
 
-The Knox authentication page supports custom themes through CSS overrides. Themes allow operators to customize the login page appearance to match their organization's branding without modifying the core Knox CSS files.
+Knox authentication pages support custom themes through CSS overrides. Themes allow operators to customize the login and logout (session termination) pages to match their organization's branding without modifying the core Knox CSS files.
+
+Theme CSS is loaded by `js/knox-theme.js` (after `theme-config.js`) on both pages.
 
 ## How It Works
 
@@ -30,15 +32,16 @@ The Knox authentication page supports custom themes through CSS overrides. Theme
 
 ### Method 1: URL Parameter (Recommended for testing)
 
-Add `?theme=THEME_NAME` to the login URL:
+Add `?theme=THEME_NAME` to the login or logout URL:
 
 ```
 https://knox.example.com/gateway/knoxsso/knoxauth/login.html?theme=modern
+https://knox.example.com/gateway/knoxsso/knoxauth/logout.jsp?theme=modern
 ```
 
 This will:
 - Load the theme immediately
-- Save the theme preference to localStorage for future visits
+- Save the theme preference to localStorage (`knox-auth-theme`) for future visits on both pages
 
 ### Method 2: localStorage (Automatic persistence)
 
@@ -420,8 +423,8 @@ RewriteRule ^(.*/knoxauth/login\.html)$ $1?theme=modern [QSA,L]
 </script>
 ```
 
-**Option C**: Modify login.html directly (not recommended)
-Change the default in login.html's theme loader script.
+**Option C**: Modify `js/knox-theme.js` directly (not recommended)
+Use `theme-config.js` instead.
 
 ## Browser Compatibility
 
@@ -441,9 +444,18 @@ Modern CSS features used:
 
 ## Security Considerations
 
-1. **XSS Protection**: Theme names are not executed as code, only used to construct file paths
-2. **Path Traversal**: Theme loader only loads files from `styles/themes/` directory
-3. **Content Security Policy**: Ensure CSP allows loading external fonts if using Google Fonts
+1. **Theme Name Validation**: Theme names arrive from untrusted sources (the `?theme=`
+   URL parameter and the saved localStorage preference), so each candidate must match
+   `^[a-zA-Z0-9_-]{1,64}$` before it is stored or used. Validation is applied on the
+   localStorage read path as well as the URL, and a value that fails is discarded.
+2. **XSS Protection**: The stylesheet element is created with DOM APIs
+   (`document.createElement`) rather than by concatenating markup, so a theme name can
+   never be parsed as HTML.
+3. **Path Traversal**: The validation pattern rejects dots and path separators, so the
+   only URL the loader can produce is `styles/themes/THEME_NAME/theme.css`. A name that
+   does not correspond to an installed theme simply fails to load and the base styles
+   remain in effect - the themes present on the server are the effective allowlist.
+4. **Content Security Policy**: Ensure CSP allows loading external fonts if using Google Fonts
 
 ## Troubleshooting
 

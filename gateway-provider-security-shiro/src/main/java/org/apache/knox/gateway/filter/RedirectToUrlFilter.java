@@ -21,12 +21,13 @@ package org.apache.knox.gateway.filter;
 import java.io.IOException;
 import java.util.regex.Pattern;
 
-import javax.servlet.FilterChain;
-import javax.servlet.FilterConfig;
-import javax.servlet.ServletException;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.FilterConfig;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.knox.gateway.config.GatewayConfig;
 
 public class RedirectToUrlFilter extends AbstractGatewayFilter {
@@ -47,7 +48,9 @@ public class RedirectToUrlFilter extends AbstractGatewayFilter {
 
   @Override
   protected void doFilter(HttpServletRequest request, HttpServletResponse response, FilterChain chain) throws IOException, ServletException {
-    if (redirectUrl != null && request.getHeader("Authorization") == null) {
+    // Treat a blank fedOpSid the same as absent: a bare "?fedOpSid=" must not suppress the redirect.
+    // (Downstream authentication still runs; this only prevents an empty param from skipping it.)
+    if (redirectUrl != null && request.getHeader("Authorization") == null && StringUtils.isBlank(request.getParameter("fedOpSid"))) {
       response.sendRedirect(redirectUrl + getOriginalQueryString(request));
     }
     chain.doFilter(request, response);

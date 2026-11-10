@@ -41,15 +41,15 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import javax.security.auth.Subject;
-import javax.servlet.Filter;
-import javax.servlet.FilterChain;
-import javax.servlet.FilterConfig;
-import javax.servlet.ServletContext;
-import javax.servlet.ServletException;
-import javax.servlet.ServletRequest;
-import javax.servlet.ServletResponse;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
+import jakarta.servlet.Filter;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.FilterConfig;
+import jakarta.servlet.ServletContext;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletResponse;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 
 import com.nimbusds.jose.proc.DefaultJOSEObjectTypeVerifier;
 import com.nimbusds.jose.proc.JOSEObjectTypeVerifier;
@@ -69,12 +69,14 @@ import org.apache.knox.gateway.filter.AbstractGatewayFilter;
 import org.apache.knox.gateway.i18n.messages.MessagesFactory;
 import org.apache.knox.gateway.provider.federation.jwt.JWTMessages;
 import org.apache.knox.gateway.security.ActorChainPrincipalImpl;
+import org.apache.knox.gateway.security.AuthTokenCredential;
 import org.apache.knox.gateway.security.PrimaryPrincipal;
 import org.apache.knox.gateway.security.SubjectUtils;
 import org.apache.knox.gateway.security.TokenIdPrincipal;
 import org.apache.knox.gateway.services.GatewayServices;
 import org.apache.knox.gateway.services.ServiceLifecycleException;
 import org.apache.knox.gateway.services.ServiceType;
+import org.apache.knox.gateway.services.knoxidf.trustedoidcissuer.IssuerJwksTrust;
 import org.apache.knox.gateway.services.security.AliasService;
 import org.apache.knox.gateway.services.security.AliasServiceException;
 import org.apache.knox.gateway.services.security.token.JWTokenAuthority;
@@ -105,6 +107,15 @@ public abstract class AbstractJWTFilter implements Filter {
   public static final String TOKEN_PREFIX = "Token ";
   public static final String DISABLED_POSTFIX = " is disabled";
   public static final String IDLE_TIMEOUT_POSTFIX = " exceeded idle timeout";
+  public static final String UNTRUSTED_ISSUER_PREFIX = "Token issuer '";
+  public static final String UNTRUSTED_ISSUER_POSTFIX = "' is not trusted";
+
+  /**
+   * Topology provider param (default false). When true, a JWT presented in a <em>cookie</em> whose
+   * Knox token id has no server-managed state is validated against its own {@code exp} claim
+   * instead of being rejected.
+   */
+  public static final String ALLOW_UNKNOWN_COOKIE_TOKEN_STATE = "knox.token.allow.unknown.cookie.state";
 
   /**
    * If specified, this configuration property refers to the signature algorithm which a received
@@ -135,6 +146,7 @@ public abstract class AbstractJWTFilter implements Filter {
 
   private TokenStateService tokenStateService;
   private TokenMAC tokenMAC;
+  private boolean allowUnknownCookieTokenState;
   protected long idleTimeoutSeconds = -1;
   protected String topologyName;
   protected boolean isJwtInstanceKeyFallback = JWT_INSTANCE_KEY_FALLBACK_DEFAULT;
@@ -169,6 +181,9 @@ public abstract class AbstractJWTFilter implements Filter {
         }
       }
     }
+
+    allowUnknownCookieTokenState =
+        Boolean.parseBoolean(filterConfig.getInitParameter(ALLOW_UNKNOWN_COOKIE_TOKEN_STATE));
 
     // Setup the verified tokens cache
     topologyName = context != null ? (String) context.getAttribute(GatewayServices.GATEWAY_CLUSTER_ATTRIBUTE) : null;
@@ -250,61 +265,149 @@ public abstract class AbstractJWTFilter implements Filter {
   }
 
   protected boolean tokenIsStillValid(final JWT jwtToken) throws UnknownTokenException {
-    Date expires = getServerManagedStateExpiration(TokenUtils.getTokenId(jwtToken));
+    /* Called via non-cookie paths (subclasses) making it strict so we fail validation if server state is not found */
+    return isWithinExpiry(jwtToken, getServerManagedStateExpiration(TokenUtils.getTokenId(jwtToken)), false);
+  }
+
+  protected boolean tokenIsStillValid(final String tokenId) throws UnknownTokenException {
+    final Date expires = getServerManagedStateExpiration(tokenId);
+    return expires == null || new Date().before(expires);
+  }
+
+  /**
+   * Decide whether a token is still within its lifetime, given the server-managed expiration already
+   * looked up for it (may be null) and the token's own {@code exp} claim as the fallback.
+   *
+   * @param stateExpiration the server-managed expiration, or null when the state service has no
+   *     expiry for this token (no state service, no knox.id, no expiry recorded, or -- when
+   *     {@code stateAbsentTolerated} is true -- no state record at all).
+   * @param stateAbsentTolerated true only when the caller observed that no server-managed state
+   *     record exists for this token and the {@link #ALLOW_UNKNOWN_COOKIE_TOKEN_STATE} opt-in
+   *     excused it. In that case the token's own {@code exp} claim is the <em>only</em> bound on its
+   *     lifetime, so it must have one, as a cookie with neither a state record nor an exp claim would
+   *     never expire and (state being absent) could never be revoked, so it is rejected.
+   */
+  private boolean isWithinExpiry(final JWT jwtToken, Date stateExpiration, final boolean stateAbsentTolerated) {
+    Date expires = stateExpiration;
     if (expires == null) {
-      // if there is no expiration date then the lifecycle is tied entirely to
-      // the cookie validity - otherwise ensure that the current time is before
-      // the designated expiration time
+      // No server-managed expiry, the lifecycle is tied to the token's own exp claim.
       expires = jwtToken.getExpiresDate();
+      if (expires == null && stateAbsentTolerated) {
+        log.toleratedCookieTokenHasNoExpiry(Tokens.getTokenIDDisplayText(TokenUtils.getTokenId(jwtToken)),
+            ALLOW_UNKNOWN_COOKIE_TOKEN_STATE);
+        return false;
+      }
     }
     return expires == null || new Date().before(expires);
   }
 
-  protected boolean tokenIsStillValid(final String tokenId) throws UnknownTokenException {
-    Date expires = getServerManagedStateExpiration(tokenId);
-    return expires == null || (new Date().before(expires));
-  }
-
+  /**
+   * The server-managed expiration for a token, or null when no token state found,
+   * a token with no knox.id (an externally issued token on the token-exchange path), or a state record that
+   * records no expiry. A token the state service has never heard of raises
+   * {@link UnknownTokenException}; the caller decides whether to tolerate that.
+   */
   private Date getServerManagedStateExpiration(final String tokenId) throws UnknownTokenException {
-    Date expires = null;
-    if (tokenStateService != null) {
-      long value = tokenStateService.getTokenExpiration(tokenId);
+    if (tokenStateService != null && tokenId != null && !tokenId.isEmpty()) {
+      final long value = tokenStateService.getTokenExpiration(tokenId);
       if (value > 0) {
-        expires = new Date(value);
+        return new Date(value);
       }
     }
-    return expires;
+    return null;
+  }
+
+  /**
+   * Look up server-managed metadata for a token, without tolerating the absence of token state.
+   *
+   * <p>Returns {@code null} when there is no token state service, or when {@code tokenId} is
+   * null/empty. Server-managed metadata is keyed by the Knox token id (the {@code knox.id}
+   * claim); an externally-issued token accepted on the token-exchange path (e.g. a Kubernetes
+   * ServiceAccount projected token from a registered OIDC issuer) has none. Passing its null id
+   * to the state service would raise {@link IllegalArgumentException} (surfacing as a 500) or
+   * {@link UnknownTokenException} (a spurious 401), rather than simply resolving to no metadata.
+   */
+  private TokenMetadata getTokenMetadata(final String tokenId) throws UnknownTokenException {
+    return getTokenMetadata(tokenId, false);
+  }
+
+  /**
+   * @param stateAbsentTolerated true only when the expiration lookup for this same token already
+   *     established that <em>no</em> server-managed record exists and the opt-in excused it. The
+   *     metadata record lives in its own
+   *     table, written by a separate call, so the expiration lookup can succeed while this one
+   *     raises; such a token demonstrably HAS server-managed state and must keep its
+   *     enabled/disabled gate, which is why the opt-in alone is not sufficient here.
+   *
+   *     <p>Null metadata is the "no server-managed state" case throughout validation:
+   *     {@link #isTokenEnabled} and {@link #isIdleTimeoutLimitNotExceeded} both pass and
+   *     {@link #markLastUsedAt} is a no-op. So a tolerated cookie is <em>not</em> subject to
+   *     idle-timeout enforcement, and cannot be disabled through server-managed metadata. It also
+   *     cannot be revoked: revocation deletes the state record, which is indistinguishable from
+   *     never having had one. For a cookie minted by a remote Knox instance -- the case this
+   *     opt-in exists for -- the verifying gateway never held revocable state for it anyway.
+   */
+  private TokenMetadata getTokenMetadata(final String tokenId, final boolean stateAbsentTolerated)
+      throws UnknownTokenException {
+    if (tokenStateService == null || tokenId == null || tokenId.isEmpty()) {
+      return null;
+    }
+    try {
+      return tokenStateService.getTokenMetadata(tokenId);
+    } catch (UnknownTokenException e) {
+      if (!stateAbsentTolerated) {
+        throw e;
+      }
+      // The expiration lookup already logged the tolerated absence for this token.
+      return null;
+    }
   }
 
   /**
    * Validate whether any of the accepted audience claims is present in the
-   * issued token claims list for audience. Override this method in subclasses
-   * in order to customize the audience validation behavior.
+   * issued token claims list for audience. This method is here for backwards compatibility
+   * with external code. To customize audience validation logic, use a RequestAudienceValidator.
    *
    * @param jwtToken
    *          the JWT token where the allowed audiences will be found
    * @return true if an expected audience is present, otherwise false
    */
+  @Deprecated
   protected boolean validateAudiences(final JWT jwtToken) {
+    return matchesConfiguredAudiences(jwtToken, audiences);
+  }
+
+  /**
+   * Validate whether any of the accepted audience claims is present in the
+   * issued token claims list for audience.
+   *
+   * @param jwtToken
+   *          the JWT token where the audiences to verify will be found
+   * @param configuredAudiences
+   *          the configured list of acceptable audiences, or null if any
+   *          audience is acceptable
+   * @return true if an expected audience is present, otherwise false
+   */
+  public static boolean matchesConfiguredAudiences(final JWT jwtToken, final List<String> configuredAudiences) {
     boolean valid = false;
 
     String[] tokenAudienceList = jwtToken.getAudienceClaims();
     // if there were no expected audiences configured then just
     // consider any audience acceptable
-    if (audiences == null) {
+    if (configuredAudiences == null) {
       valid = true;
     } else {
       // if any of the configured audiences is found then consider it
       // acceptable
       if (tokenAudienceList != null) {
         for (String aud : tokenAudienceList) {
-          if (audiences.contains(aud)) {
+          if (configuredAudiences.contains(aud)) {
             log.jwtAudienceValidated();
             valid = true;
             break;
           }
         }
-      } else if (audiences.contains("NONE")) {
+      } else if (configuredAudiences.contains("NONE")) {
         log.jwtAudienceValidated();
         valid = true;
       }
@@ -348,7 +451,12 @@ public abstract class AbstractJWTFilter implements Filter {
       auditService.attachContext(context);
       String sourceUri = (String)request.getAttribute( AbstractGatewayFilter.SOURCE_REQUEST_CONTEXT_URL_ATTRIBUTE_NAME );
       if (sourceUri != null) {
-        auditor.audit( Action.AUTHENTICATION , sourceUri, ResourceType.URI, ActionOutcome.SUCCESS );
+        final String actorChain = SubjectUtils.renderActorChain(SubjectUtils.getActorChainPrincipal(subject));
+        if (actorChain.isEmpty()) {
+          auditor.audit( Action.AUTHENTICATION , sourceUri, ResourceType.URI, ActionOutcome.SUCCESS );
+        } else {
+          auditor.audit( Action.AUTHENTICATION , sourceUri, ResourceType.URI, ActionOutcome.SUCCESS, "act_chain=" + actorChain );
+        }
       }
     }
 
@@ -382,7 +490,47 @@ public abstract class AbstractJWTFilter implements Filter {
     return createSubjectFromToken(new JWTToken(token));
   }
 
+  /**
+   * Builds a Subject for a validated JWT <em>without</em> capturing the token for downstream
+   * forwarding. This is the safe default, and it is what grant-flow artifacts must use: a
+   * {@code refresh_token}, a {@code client_assertion} or an RFC 8693 {@code subject_token} is
+   * presented in order to mint a new token, not as the credential the caller authenticated this
+   * request with, so KNOX-AUTH-SERVICE must never echo it downstream.
+   *
+   * @see #createSubjectFromCallerToken(JWT)
+   */
   protected Subject createSubjectFromToken(final JWT token) throws UnknownTokenException {
+    return createSubjectFromToken(token, null);
+  }
+
+  /**
+   * Builds a Subject for a validated JWT that the caller presented as this request's own
+   * credential, an {@code Authorization: Bearer}/{@code Basic} JWT, the configured token query
+   * parameter, or a KnoxSSO cookie. The serialized token is carried on the Subject as an
+   * {@link org.apache.knox.gateway.security.AuthTokenCredential} so that KNOX-AUTH-SERVICE can
+   * forward it downstream when the operator opts in via
+   * {@code preauth.auth.header.auth.token.name}.
+   *
+   * @see #createSubjectFromToken(JWT)
+   */
+  protected Subject createSubjectFromCallerToken(final JWT token) throws UnknownTokenException {
+    return createSubjectFromToken(token, token.toString());
+  }
+
+  /**
+   * The single point at which a validated JWT becomes a Subject, and therefore the method to
+   * override to decorate that Subject: both {@link #createSubjectFromToken(JWT)} and
+   * {@link #createSubjectFromCallerToken(JWT)} delegate here, so an override sees the caller's own
+   * credential and a grant-flow artifact alike, told apart by {@code serializedToken}.
+   *
+   * @param token the validated JWT
+   * @param serializedToken the token's serialized form when it is the credential the caller
+   *        authenticated this request with and may therefore be forwarded downstream, or
+   *        {@code null} when it must not be captured
+   * @return the Subject for the authenticated request
+   * @throws UnknownTokenException if the token's state cannot be resolved
+   */
+  protected Subject createSubjectFromToken(final JWT token, final String serializedToken) throws UnknownTokenException {
     String principal = token.getSubject();
     String claimvalue = null;
     if (expectedPrincipalClaim != null) {
@@ -397,11 +545,11 @@ public abstract class AbstractJWTFilter implements Filter {
     // To modify the Principals Set, the caller must have AuthPermission("modifyPrincipals").
     // To modify the public credential Set, the caller must have AuthPermission("modifyPublicCredentials").
     // To modify the private credential Set, the caller must have AuthPermission("modifyPrivateCredentials").
-    return createSubjectFromTokenData(principal, claimvalue, null, actorChain);
+    return createSubjectFromTokenData(principal, claimvalue, null, actorChain, serializedToken);
   }
 
   public Subject createSubjectFromTokenIdentifier(final String tokenId) throws UnknownTokenException {
-    TokenMetadata metadata = tokenStateService.getTokenMetadata(tokenId);
+    TokenMetadata metadata = getTokenMetadata(tokenId);
     if (metadata != null) {
       // using tokenID and passcode as CLIENT_ID and CLIENT_SECRET will
       // result in a metadata item called "type". If the value is set
@@ -436,6 +584,28 @@ public abstract class AbstractJWTFilter implements Filter {
                                                final String expectedPrincipalClaimValue,
                                                final String tokenId,
                                                final List<Map<String, Object>> actorChain) {
+    return createSubjectFromTokenData(principal, expectedPrincipalClaimValue, tokenId, actorChain, null);
+  }
+
+  /**
+   * Create a Subject from the data of a validated token.
+   *
+   * @param principal                    the token's subject
+   * @param expectedPrincipalClaimValue  the value of the configured principal claim, if any
+   * @param tokenId                      the token's id, if any
+   * @param actorChain                   the RFC 8693 delegation actor chain, if any
+   * @param serializedToken              the serialized JWT to carry in the subject's private
+   *                                     credentials so that it can be forwarded downstream,
+   *                                     or null when there is no JWT behind this identity
+   *                                     (for example a passcode token)
+   * @return a read-only Subject representing the authenticated caller
+   */
+  @SuppressWarnings("rawtypes")
+  protected Subject createSubjectFromTokenData(final String principal,
+                                               final String expectedPrincipalClaimValue,
+                                               final String tokenId,
+                                               final List<Map<String, Object>> actorChain,
+                                               final String serializedToken) {
     String claimValue =
               (expectedPrincipalClaimValue != null) ? expectedPrincipalClaimValue.toLowerCase(Locale.ROOT) : null;
 
@@ -459,75 +629,251 @@ public abstract class AbstractJWTFilter implements Filter {
     // To modify the Principals Set, the caller must have AuthPermission("modifyPrincipals").
     // To modify the public credential Set, the caller must have AuthPermission("modifyPublicCredentials").
     // To modify the private credential Set, the caller must have AuthPermission("modifyPrivateCredentials").
-    return new Subject(true, principals, emptySet, emptySet);
+    // The caller's token is carried as a private credential rather than a principal: it is a
+    // credential, not an identity, and must never be picked up as a user name by
+    // SubjectUtils.getPrimaryPrincipalName. The Subject is read-only, so this has to be handed
+    // to the constructor, it cannot be added afterwards. Note this must be a set of its own:
+    // emptySet is shared with the public credentials argument and must stay empty.
+    Set<Object> privateCredentials = new HashSet<>();
+    if (serializedToken != null) {
+      privateCredentials.add(new AuthTokenCredential(serializedToken));
+    }
+
+    return new Subject(true, principals, emptySet, privateCredentials);
   }
 
 
   protected boolean validateToken(final HttpServletRequest request, final HttpServletResponse response,
       final FilterChain chain, final JWT token)
       throws IOException, ServletException {
+    return validateToken(request, response, chain, token, false);
+  }
+
+  /**
+   * @param cookieAuth true when {@code token} was presented in a cookie rather than in the
+   *     {@code Authorization} header. Only a cookie may be exempted from a missing server-managed
+   *     token state record, and only when {@link #ALLOW_UNKNOWN_COOKIE_TOKEN_STATE} is enabled.
+   */
+  protected boolean validateToken(final HttpServletRequest request, final HttpServletResponse response,
+      final FilterChain chain, final JWT token, final boolean cookieAuth)
+      throws IOException, ServletException {
+    return validateToken(request, response, chain, token,
+        (req, tok, configuredAudiences) -> AudienceValidationResult.of(matchesConfiguredAudiences(tok, configuredAudiences)),
+        cookieAuth);
+  }
+
+  protected boolean validateToken(final HttpServletRequest request, final HttpServletResponse response,
+      final FilterChain chain, final JWT token, final RequestAudienceValidator requestAudienceValidator)
+      throws IOException, ServletException {
+    return validateToken(request, response, chain, token, requestAudienceValidator, false);
+  }
+
+  /**
+   * @param cookieAuth true when {@code token} was presented in a cookie rather than in the
+   *     {@code Authorization} header. Only a cookie may be exempted from a missing server-managed
+   *     token state record, and only when {@link #ALLOW_UNKNOWN_COOKIE_TOKEN_STATE} is enabled.
+   */
+  protected boolean validateToken(final HttpServletRequest request, final HttpServletResponse response,
+      final FilterChain chain, final JWT token, final RequestAudienceValidator requestAudienceValidator,
+      final boolean cookieAuth)
+      throws IOException, ServletException {
     final String tokenId = TokenUtils.getTokenId(token);
     final String displayableTokenId = Tokens.getTokenIDDisplayText(tokenId);
     final String displayableToken = Tokens.getTokenDisplayText(token.toString());
-    // confirm that issuer matches the intended target
     if (expectedIssuers.contains(token.getIssuer())) {
-      // if there is no expiration data then the lifecycle is tied entirely to
-      // the cookie validity - otherwise ensure that the current time is before
-      // the designated expiration time
+      // Issuer in the static trusted list: full validation using the provider-configured
+      // PEM/JWKS/instance-key chain. An empty set signals "use verifyTokenSignature()".
+      return doFullTokenValidation(request, response, token, tokenId,
+          displayableToken, displayableTokenId, RegisteredIssuerJwks.EMPTY, requestAudienceValidator, cookieAuth);
+    }
+    // For issuers not in the static list, subclasses may resolve JWKS for a runtime-registered issuer.
+    // An empty result means "not applicable for this request" and the token is rejected.
+    // All other validation checks (expiry, audiences, nbf, token state) run identically to the static path.
+    final RegisteredIssuerJwks registeredIssuerJwks = resolveRegisteredIssuerJwks(token.getIssuer(), request);
+    if (!registeredIssuerJwks.uris().isEmpty()) {
+      return doFullTokenValidation(request, response, token, tokenId,
+          displayableToken, displayableTokenId, registeredIssuerJwks, requestAudienceValidator, cookieAuth);
+    }
+    // The issuer is read before the signature is verified, so it is attacker-controlled.
+    final String displayableIssuer = TokenUtils.getIssuerDisplayText(token.getIssuer());
+    log.rejectedTokenWithUnexpectedIssuer(displayableToken, displayableTokenId, displayableIssuer);
+    handleValidationError(request, response, HttpServletResponse.SC_UNAUTHORIZED,
+        UNTRUSTED_ISSUER_PREFIX + displayableIssuer + UNTRUSTED_ISSUER_POSTFIX);
+    return false;
+  }
+
+  /**
+   * Extension point for subclasses to resolve JWKS for an issuer that is registered at runtime
+   * (e.g., in {@code TrustedOidcIssuerService}) but is not in the static
+   * {@code jwt.expected.issuer} topology parameter.
+   *
+   * <p>Return semantics:
+   * <ul>
+   *   <li>Non-empty URI set — caller runs full token validation using only these JWKS for signature
+   *       verification; the provider-configured PEM/JWKS/instance-key chain is not consulted. The
+   *       JWKS are fetched trusting only the issuer's CA bundle if one is given, or the default
+   *       truststore otherwise.</li>
+   *   <li>Empty URI set ({@link RegisteredIssuerJwks#EMPTY}) — not applicable for this request;
+   *       caller rejects with 401.</li>
+   * </ul>
+   *
+   * <p>The default implementation always returns {@link RegisteredIssuerJwks#EMPTY}. Subclasses that
+   * support a runtime issuer registry should override this method, applying any request-context
+   * checks themselves, and return a non-empty URI set only when the issuer is found in the registry
+   * and its JWKS URI has been successfully resolved.
+   */
+  protected RegisteredIssuerJwks resolveRegisteredIssuerJwks(String issuer, HttpServletRequest request) {
+    return RegisteredIssuerJwks.EMPTY;
+  }
+
+  /**
+   * The JWKS URIs resolved for a runtime-registered issuer, and the TLS trust to fetch them with.
+   *
+   * @param uris the issuer's JWKS URIs
+   * @param jwksTrust the trust of the issuer's CA bundle, or null if the default truststore applies
+   */
+  protected record RegisteredIssuerJwks(Set<URI> uris, IssuerJwksTrust jwksTrust) {
+    public static final RegisteredIssuerJwks EMPTY = new RegisteredIssuerJwks(Set.of(), null);
+
+    public RegisteredIssuerJwks {
+      uris = Set.copyOf(uris);
+    }
+  }
+
+  /**
+   * Runs the full token validation sequence (expiry, audiences, nbf, token state, signature)
+   * used by both the static-issuer path and the registered-issuer path.
+   *
+   * @param registeredIssuerJwks if its URI set is non-empty, the signature is verified exclusively
+   *     against these JWKS URIs (resolved for the issuer from the runtime registry); if empty,
+   *     {@link #verifyTokenSignature(JWT)} is used instead (provider-configured PEM / JWKS /
+   *     instance-key chain).
+   * @param cookieAuth true when the token was presented in a cookie; see
+   *     {@link #ALLOW_UNKNOWN_COOKIE_TOKEN_STATE}.
+   */
+  private boolean doFullTokenValidation(final HttpServletRequest request, final HttpServletResponse response,
+      final JWT token, final String tokenId, final String displayableToken,
+      final String displayableTokenId, final RegisteredIssuerJwks registeredIssuerJwks,
+      final RequestAudienceValidator requestAudienceValidator, final boolean cookieAuth)
+      throws IOException, ServletException {
+    try {
+      // A missing server-managed state record is tolerated only for a cookie, and only when the
+      // provider opted in. Resolve it once per request: whether the record was genuinely absent is
+      // also what decides the metadata lookup below, and a second round trip would be both wasteful
+      // and racy.
+      final boolean tolerateUnknownState = cookieAuth && allowUnknownCookieTokenState;
+      Date stateExpiration;
+      boolean stateAbsentTolerated = false;
       try {
-        if (tokenIsStillValid(token)) {
-          boolean audValid = validateAudiences(token);
-          if (audValid) {
-            Date nbf = token.getNotBeforeDate();
-            if (nbf == null || new Date().after(nbf)) {
-              final TokenMetadata tokenMetadata = tokenStateService == null ? null : tokenStateService.getTokenMetadata(tokenId);
-              if (isTokenEnabled(tokenMetadata)) {
-                if (isIdleTimeoutLimitNotExceeded(tokenMetadata)) {
-                  if (verifyTokenSignature(token)) {
-                    markLastUsedAt(tokenId, tokenMetadata);
-                    return true;
-                  } else {
-                    log.failedToVerifyTokenSignature(displayableToken, displayableTokenId);
-                    handleValidationError(request, response, HttpServletResponse.SC_UNAUTHORIZED, null);
-                  }
+        stateExpiration = getServerManagedStateExpiration(tokenId);
+      } catch (UnknownTokenException e) {
+        if (!tolerateUnknownState) {
+          // The outer handler turns this into a 401, but logs only the generic
+          // "unable to verify token expiration". Record the actual reason and the remedy here.
+          log.unknownTokenStateRejected(displayableTokenId, ALLOW_UNKNOWN_COOKIE_TOKEN_STATE);
+          throw e;
+        }
+        log.unknownCookieTokenStateTolerated(displayableTokenId, ALLOW_UNKNOWN_COOKIE_TOKEN_STATE);
+        stateExpiration = null;
+        stateAbsentTolerated = true;
+      }
+      if (isWithinExpiry(token, stateExpiration, stateAbsentTolerated)) {
+        final AudienceValidationResult audienceValidationResult = validateAudience(request, token, requestAudienceValidator);
+        if (audienceValidationResult.isValid()) {
+          Date nbf = token.getNotBeforeDate();
+          if (nbf == null || new Date().after(nbf)) {
+            final TokenMetadata tokenMetadata = getTokenMetadata(tokenId, stateAbsentTolerated);
+            if (isTokenEnabled(tokenMetadata)) {
+              if (isIdleTimeoutLimitNotExceeded(tokenMetadata)) {
+                final boolean sigOk = registeredIssuerJwks.uris().isEmpty()
+                    ? verifyTokenSignature(token)
+                    : verifyTokenSignatureWithJwks(token, registeredIssuerJwks);
+                if (sigOk) {
+                  markLastUsedAt(tokenId, tokenMetadata);
+                  return true;
                 } else {
-                  log.idleTimoutExceeded(token.getSubject(), displayableTokenId, idleTimeoutSeconds);
-                  handleValidationError(request, response, HttpServletResponse.SC_UNAUTHORIZED, TOKEN_PREFIX + displayableTokenId + IDLE_TIMEOUT_POSTFIX);
+                  log.failedToVerifyTokenSignature(displayableToken, displayableTokenId);
+                  handleValidationError(request, response, HttpServletResponse.SC_UNAUTHORIZED, null);
                 }
               } else {
-                log.disabledToken(displayableTokenId);
-                handleValidationError(request, response, HttpServletResponse.SC_UNAUTHORIZED, TOKEN_PREFIX + displayableTokenId + DISABLED_POSTFIX);
+                log.idleTimoutExceeded(token.getSubject(), displayableTokenId, idleTimeoutSeconds);
+                handleValidationError(request, response, HttpServletResponse.SC_UNAUTHORIZED,
+                    TOKEN_PREFIX + displayableTokenId + IDLE_TIMEOUT_POSTFIX);
               }
             } else {
-              log.notBeforeCheckFailed();
-              handleValidationError(request, response, HttpServletResponse.SC_BAD_REQUEST,
-                      "Bad request: the NotBefore check failed");
+              log.disabledToken(displayableTokenId);
+              handleValidationError(request, response, HttpServletResponse.SC_UNAUTHORIZED,
+                  TOKEN_PREFIX + displayableTokenId + DISABLED_POSTFIX);
             }
           } else {
-            log.failedToValidateAudience(displayableToken, displayableTokenId);
+            log.notBeforeCheckFailed();
             handleValidationError(request, response, HttpServletResponse.SC_BAD_REQUEST,
-                    "Bad request: missing required token audience");
+                "Bad request: the NotBefore check failed");
           }
         } else {
-          log.tokenHasExpired(displayableToken, displayableTokenId);
-
-          // Explicitly evict the record of this token's signature verification (if present).
-          // There is no value in keeping this record for expired tokens, and explicitly removing them may prevent
-          // records for other valid tokens from being prematurely evicted from the cache.
-          removeSignatureVerificationRecord(token.toString());
-
-          handleValidationError(request, response, HttpServletResponse.SC_UNAUTHORIZED, "Token has expired");
-
+          if (audienceValidationResult.message() != null) {
+            log.failedToValidateAudience(displayableToken, displayableTokenId, audienceValidationResult.message());
+          } else {
+            log.failedToValidateAudience(displayableToken, displayableTokenId);
+          }
+          handleValidationError(request, response, HttpServletResponse.SC_BAD_REQUEST,
+              "Bad request: missing required token audience");
         }
-      } catch (UnknownTokenException e) {
-        log.unableToVerifyExpiration(e);
-        handleValidationError(request, response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
+      } else {
+        log.tokenHasExpired(displayableToken, displayableTokenId);
+        // Explicitly evict the record of this token's signature verification (if present).
+        // There is no value in keeping this record for expired tokens, and explicitly removing them
+        // may prevent records for other valid tokens from being prematurely evicted from the cache.
+        removeSignatureVerificationRecord(token.toString());
+        handleValidationError(request, response, HttpServletResponse.SC_UNAUTHORIZED, "Token has expired");
       }
-    } else {
-      handleValidationError(request, response, HttpServletResponse.SC_UNAUTHORIZED, null);
+    } catch (UnknownTokenException e) {
+      log.unableToVerifyExpiration(e);
+      handleValidationError(request, response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
     }
-
     return false;
+  }
+
+  /**
+   * Runs the configured {@link RequestAudienceValidator} and shields the caller from a
+   * misbehaving implementation throwing out of {@code validate()}; such a failure is treated
+   * as a rejected audience rather than propagating and failing the request some other way.
+   */
+  private AudienceValidationResult validateAudience(final HttpServletRequest request, final JWT token,
+      final RequestAudienceValidator requestAudienceValidator) {
+    try {
+      return requestAudienceValidator.validate(request, token, audiences);
+    } catch (final RuntimeException e) {
+      return new AudienceValidationResult(false, "RequestAudienceValidator threw an exception: " + e.getMessage());
+    }
+  }
+
+  /**
+   * Verifies the token's signature against the given registered issuer JWKS URIs, fetched with the
+   * issuer's TLS trust. Uses the filter's configured signature algorithm.
+   */
+  private boolean verifyTokenSignatureWithJwks(final JWT token, final RegisteredIssuerJwks registeredIssuerJwks) {
+    final String serializedJWT = token.toString();
+    if (hasSignatureBeenVerified(serializedJWT)) {
+      return true;
+    }
+    try {
+      // Tokens reaching this path have already been established (by the caller) to belong to a
+      // dynamically registered, trusted OIDC issuer during an actual RFC 8693 token-exchange call.
+      // Such issuers (e.g. Kubernetes) may omit the "typ" JOSE header, so a dedicated, permissive
+      // verifier is used here instead of the filter-wide this.typeVerifier field.
+      final JOSEObjectTypeVerifier<SecurityContext> registeredIssuerTypeVerifier =
+              new DefaultJOSEObjectTypeVerifier<>(new HashSet<>(Arrays.asList(JOSEObjectType.JWT, null)));
+      final boolean verified = authority.verifyToken(token, registeredIssuerJwks.uris(), expectedSigAlg,
+          registeredIssuerTypeVerifier, registeredIssuerJwks.jwksTrust());
+      if (verified) {
+        recordSignatureVerification(serializedJWT);
+      }
+      return verified;
+    } catch (TokenServiceException e) {
+      log.unableToVerifyToken(e);
+      return false;
+    }
   }
 
   private boolean isTokenEnabled(TokenMetadata tokenMetadata) throws UnknownTokenException {
@@ -565,10 +911,10 @@ public abstract class AbstractJWTFilter implements Filter {
       try {
         if (tokenId != null) {
           if (tokenIsStillValid(tokenId)) {
-            final TokenMetadata tokenMetadata = tokenStateService == null ? null : tokenStateService.getTokenMetadata(tokenId);
+            final TokenMetadata tokenMetadata = getTokenMetadata(tokenId);
             if (isTokenEnabled(tokenMetadata)) {
               if (isIdleTimeoutLimitNotExceeded(tokenMetadata)) {
-                if (hasSignatureBeenVerified(passcode) || validatePasscode(tokenId, passcode)) {
+                if (hasSignatureBeenVerified(passcodeVerificationCacheKey(tokenId, passcode)) || validatePasscode(tokenId, passcode)) {
                   markLastUsedAt(tokenId, tokenMetadata);
                   return true;
                 } else {
@@ -589,7 +935,7 @@ public abstract class AbstractJWTFilter implements Filter {
             // Explicitly evict the record of this token's signature verification (if present).
             // There is no value in keeping this record for expired tokens, and explicitly removing them may prevent
             // records for other valid tokens from being prematurely evicted from the cache.
-            removeSignatureVerificationRecord(passcode);
+            removeSignatureVerificationRecord(passcodeVerificationCacheKey(tokenId, passcode));
             handleValidationError(request, response, HttpServletResponse.SC_UNAUTHORIZED, "Token has expired");
           }
         } else {
@@ -610,12 +956,12 @@ public abstract class AbstractJWTFilter implements Filter {
 
   private boolean validatePasscode(String tokenId, String passcode) throws UnknownTokenException {
     final long issueTime = tokenStateService.getTokenIssueTime(tokenId);
-    final TokenMetadata tokenMetadata = tokenStateService.getTokenMetadata(tokenId);
+    final TokenMetadata tokenMetadata = getTokenMetadata(tokenId);
     final String userName = tokenMetadata == null ? "" : tokenMetadata.getUserName();
     final byte[] storedPasscode = tokenMetadata == null ? null : tokenMetadata.getPasscode().getBytes(UTF_8);
     final boolean validPasscode = Arrays.equals(tokenMAC.hash(tokenId, issueTime, userName, passcode).getBytes(UTF_8), storedPasscode);
     if (validPasscode) {
-      recordSignatureVerification(passcode);
+      recordSignatureVerification(passcodeVerificationCacheKey(tokenId, passcode));
     }
     return validPasscode;
   }
@@ -707,4 +1053,7 @@ public abstract class AbstractJWTFilter implements Filter {
   protected abstract void handleValidationError(HttpServletRequest request, HttpServletResponse response, int status,
                                                 String error) throws IOException;
 
+  private String passcodeVerificationCacheKey(final String tokenId, final String passcode) {
+    return tokenId + "::" + passcode;
+  }
 }

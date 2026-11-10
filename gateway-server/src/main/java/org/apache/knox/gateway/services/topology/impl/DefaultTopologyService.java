@@ -33,6 +33,7 @@ import org.apache.knox.gateway.audit.api.Auditor;
 import org.apache.knox.gateway.audit.api.ResourceType;
 import org.apache.knox.gateway.audit.log4j.audit.AuditConstants;
 import org.apache.knox.gateway.config.GatewayConfig;
+import org.apache.knox.gateway.config.GatewayConfigChangeListener;
 import org.apache.knox.gateway.i18n.messages.MessagesFactory;
 import org.apache.knox.gateway.service.definition.ServiceDefinition;
 import org.apache.knox.gateway.service.definition.ServiceDefinitionChangeListener;
@@ -86,7 +87,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class DefaultTopologyService extends FileAlterationListenerAdaptor implements TopologyService, TopologyMonitor,
-    TopologyProvider, FileFilter, FileAlterationListener, ServiceDefinitionChangeListener {
+    TopologyProvider, FileFilter, FileAlterationListener, ServiceDefinitionChangeListener, GatewayConfigChangeListener {
 
   private static final JAXBContext jaxbContext = getJAXBContext();
   private static final String TOPOLOGY_CLOSING_XML_ELEMENT = "</topology>";
@@ -306,13 +307,17 @@ public class DefaultTopologyService extends FileAlterationListenerAdaptor implem
   public void deployTopology(Topology t){
 
     try {
+      File topology = new File(topologiesDirectory.getAbsolutePath() + "/" + t.getName() + ".xml");
+      if (!topology.getCanonicalFile().toPath().startsWith(topologiesDirectory.getCanonicalFile().toPath())) {
+        throw new IOException("Resolved topology path escapes managed directory: " + t.getName());
+      }
+
       File temp = new File(topologiesDirectory.getAbsolutePath() + "/" + t.getName() + ".xml.temp");
       Marshaller mr = jaxbContext.createMarshaller();
 
       mr.setProperty(Marshaller.JAXB_FORMATTED_OUTPUT, true);
       mr.marshal(t, temp);
 
-      File topology = new File(topologiesDirectory.getAbsolutePath() + "/" + t.getName() + ".xml");
       if(!temp.renameTo(topology)) {
         FileUtils.forceDelete(temp);
         throw new IOException("Could not rename temp file");
@@ -532,6 +537,18 @@ public class DefaultTopologyService extends FileAlterationListenerAdaptor implem
     });
   }
 
+  @Override
+  public void onGatewayConfigChanged(GatewayConfig config) {
+    getTopologies().stream().filter(Topology::isReloadableListener).forEach(topology -> {
+      try {
+        log.redeployingTopologyOnGatewayConfigChange(topology.getName());
+        redeployTopology(topology);
+      } catch (RuntimeException e) {
+        log.failedToRedeployTopology(topology.getName(), e);
+      }
+    });
+  }
+
   private boolean isRelevantService(Service service, String role, String name, String version) {
     return service.getRole().equalsIgnoreCase(role)
         && (service.getName() == null || service.getName().equalsIgnoreCase(name) && (service.getVersion() == null || service.getVersion().equals(new Version(version))));
@@ -716,8 +733,15 @@ public class DefaultTopologyService extends FileAlterationListenerAdaptor implem
 
     File destFile = new File(dest, name);
     try {
-      FileUtils.writeStringToFile(destFile, content, StandardCharsets.UTF_8);
-      log.wroteConfigurationFile(destFile.getAbsolutePath());
+      final File canonicalDest = dest.getCanonicalFile();
+      final File canonicalFile = destFile.getCanonicalFile();
+      if (!canonicalFile.toPath().startsWith(canonicalDest.toPath())) {
+        log.failedToWriteConfigurationFile(destFile.getAbsolutePath(),
+            new IOException("Resolved path escapes managed directory: " + name));
+        return false;
+      }
+      FileUtils.writeStringToFile(canonicalFile, content, StandardCharsets.UTF_8);
+      log.wroteConfigurationFile(canonicalFile.getAbsolutePath());
       result = true;
     } catch (IOException e) {
       log.failedToWriteConfigurationFile(destFile.getAbsolutePath(), e);

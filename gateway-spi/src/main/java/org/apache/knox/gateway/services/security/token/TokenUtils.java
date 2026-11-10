@@ -26,21 +26,24 @@ import org.apache.knox.gateway.services.security.AliasService;
 import org.apache.knox.gateway.services.security.AliasServiceException;
 import org.apache.knox.gateway.services.security.token.impl.JWT;
 import org.apache.knox.gateway.services.security.token.impl.JWTToken;
+import org.apache.knox.gateway.util.Tokens;
 
-import javax.servlet.FilterConfig;
-import javax.servlet.ServletContext;
+import jakarta.servlet.FilterConfig;
+import jakarta.servlet.ServletContext;
 import java.security.interfaces.RSAPublicKey;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.text.ParseException;
 
 public class TokenUtils {
   public static final String ATTR_CURRENT_KNOXSSO_COOKIE_TOKEN_ID = "currentKnoxSsoCookieTokenId";
   public static final String SIGNING_HMAC_SECRET_ALIAS = "gateway.signing.hmac.secret";
   private static final String DEFAULT_RSA_SIG_ALG = "RS256";
   private static final String DEFAULT_HMAC_SIG_ALG = "HS256";
+  public static final int MAX_ISSUER_DISPLAY_LENGTH = 256;
 
   /**
    * Extract the unique Knox token identifier from the specified JWT's claim set.
@@ -51,6 +54,60 @@ public class TokenUtils {
    */
   public static String getTokenId(final JWT token) {
     return token.getClaim(JWTToken.KNOX_ID_CLAIM);
+  }
+
+  /**
+   * Resolves the token id from a value that is either a token id or an entire serialized JWT.
+   * A UUID is returned as-is. Otherwise the value is parsed as a JWT (to read the {@code knox.id}
+   * claim) only when it has the compact JWT shape; anything else — including a user-supplied
+   * client_id used as the token id (which may itself contain dots, e.g. {@code com.example.app}) —
+   * is returned verbatim as the token id.
+   */
+  public static String getTokenId(String token) throws ParseException {
+    if (Tokens.isUUID(token)) {
+      return token;
+    }
+    if (isSerializedJWT(token)) {
+      try {
+        return getTokenId(new JWTToken(token));
+      } catch (ParseException e) {
+        //NOP: dot-delimited but not a real JWT (e.g. a dotted client_id); treat it as the token id
+      }
+    }
+    return token;
+  }
+
+  /**
+   * A compact-serialized JWT is a dot-delimited value with three segments (JWS; an unsigned token
+   * keeps a trailing empty segment) or five segments (JWE). Any other shape is a plain token id.
+   */
+  private static boolean isSerializedJWT(String token) {
+    final int segments = token.split("\\.", -1).length;
+    return segments == 3 || segments == 5;
+  }
+
+  /**
+   * Render an issuer ({@code iss} claim) for logs and error responses. An issuer read from a token
+   * whose signature has not been verified yet is attacker-controlled, so control characters are
+   * replaced (no forged log lines) and the length is capped at {@link #MAX_ISSUER_DISPLAY_LENGTH}
+   * (no log flooding).
+   *
+   * @param issuer An issuer, or null.
+   *
+   * @return The display text; {@code "(none)"} if the issuer is null.
+   */
+  public static String getIssuerDisplayText(final String issuer) {
+    if (issuer == null) {
+      return "(none)";
+    }
+    final boolean truncated = issuer.length() > MAX_ISSUER_DISPLAY_LENGTH;
+    final StringBuilder displayText = new StringBuilder(MAX_ISSUER_DISPLAY_LENGTH + 3);
+    issuer.substring(0, Math.min(issuer.length(), MAX_ISSUER_DISPLAY_LENGTH)).codePoints()
+        .forEach(c -> displayText.appendCodePoint(Character.isISOControl(c) ? '?' : c));
+    if (truncated) {
+      displayText.append("...");
+    }
+    return displayText.toString();
   }
 
   /**
